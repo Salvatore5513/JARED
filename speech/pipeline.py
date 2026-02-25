@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import numpy as np
 
 from core.event_bus import EventBus
 from speech.wake.base import WakeWordEngine
@@ -18,7 +19,10 @@ class VoicePipeline:
     idle_sleep_s: float = 0.02  # 20ms
 
     # Optional tiny delay after wake before STT grabs audio
-    post_wake_delay_s: float = 0.0
+    post_wake_delay_s: float = 0.3
+    post_wake_grace_s: float = 0.8
+    min_stt_rms: float = 800.0
+    skip_blank_audio: bool = True
 
     def start(self) -> None:
         self.wake.start()
@@ -63,7 +67,29 @@ class VoicePipeline:
                     time.sleep(self.post_wake_delay_s)
 
                 try:
-                    tr = self.stt.transcribe_once(audio=wr.audio)
+                    print("[stt] listening...", flush=True)
+
+                    tr = None
+                    if self.skip_blank_audio:
+                        audio_i16 = wr.audio
+                        if audio_i16 is None or len(audio_i16) == 0:
+                            skip_reason = "no-audio"
+                            self.bus.publish("stt.skipped", reason=skip_reason)
+                            print(f"[stt] skipped: {skip_reason}", flush=True)
+                            tr = None
+                        else:
+                            # RMS in int16 units
+                            rms = float(np.sqrt(np.mean(np.square(audio_i16.astype(np.float32)))))
+                            if rms < self.min_stt_rms:
+                                skip_reason = "too-quiet"
+                                self.bus.publish("stt.skipped", reason=skip_reason, rms=rms)
+                                print(f"[stt] skipped: {skip_reason} rms={rms:.1f}", flush=True)
+                                tr = None
+                            else:
+                                tr = self.stt.transcribe_once(audio=wr.audio)
+                    else:
+                        tr = self.stt.transcribe_once(audio=wr.audio)
+
                 finally:
                     # Clear wake state so the same "hey jared" can't instantly re-trigger
                     if hasattr(self.wake, "reset"):
@@ -71,8 +97,12 @@ class VoicePipeline:
 
                     if hasattr(self.wake, "resume"):
                         self.wake.resume()  # type: ignore[attr-defined]
+
                     else:
                         self.wake.start()
+
+                if tr is None:
+                    continue
 
                 self.bus.publish(
                     "voice.transcript",

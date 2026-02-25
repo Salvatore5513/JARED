@@ -54,13 +54,15 @@ def _project_root() -> Path:
 
 @dataclass
 class OpenWakeWordConfig:
-    threshold: float = 0.65
+    threshold: float = 0.57
     cooldown_s: float = 2.0
-    # Capture @ 48k, downsample to 16k for openwakeword features
-    input_rate: int = 48000
+    min_trigger_rms: float = 0.005
+    max_rms_age_s: float = 0.25
+    input_rate: int = 48000  # Capture @ 48k, downsample to 16k for openwakeword features
     sr: int = 16000
     chunk_ms: int = 80  # 80ms @ 16k => 1280 samples (standard oww streaming chunk)
     pre_roll_ms: int = 700
+    trigger_hits_required: int = 2
 
     # Feature window your wake model expects: [1,96,16]
     n_feature_frames: int = 16
@@ -70,7 +72,7 @@ class OpenWakeWordConfig:
 
     debug_every_s: float = 1.0
     debug_audio: bool = False
-    debug_scores: bool = False
+    debug_scores: bool = True
     debug_shapes: bool = False
 
 
@@ -107,7 +109,8 @@ class OpenWakeWordEngine:
 
         self._rms_lock = threading.Lock()
         self._last_rms: float = 0.0
-        self._last_audio_ts: float = 0.0
+        self._last_audio_ts: float = time.time()
+        self._score_hist = deque(maxlen=3)
 
     def start(self) -> None:
         if self._running:
@@ -125,9 +128,6 @@ class OpenWakeWordEngine:
                 self.cfg.input_device = int(env_dev)
             except ValueError:
                 pass
-
-        if self.cfg.input_device is None:
-            self.cfg.input_device = 7  # your working DirectSound mic index
 
         print(f"[wake] init: device={self.cfg.input_device}")
         print(f"[wake] init: wake_model={wake_path.name}")
@@ -156,7 +156,16 @@ class OpenWakeWordEngine:
             print(f"[wake] wake_output shape={out_det['shape']} dtype={out_det['dtype']}")
 
         self._running = True
-        self._thread = threading.Thread(target=self._run, name="OpenWakeWordEngine", daemon=True)
+        # Prevent false trigger during startup buffer warmup
+        self._last_fire = time.time()
+        if hasattr(self, "_score_hist"):
+            self._score_hist.clear()
+
+        self._thread = threading.Thread(
+            target=self._run,
+            name="OpenWakeWordEngine",
+            daemon=True,
+        )
         self._thread.start()
         print("[wake] audio thread started")
 
@@ -218,11 +227,13 @@ class OpenWakeWordEngine:
 
             mono = indata.reshape(-1).astype(np.float32, copy=False)
 
+            rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+            with self._rms_lock:
+                self._last_rms = rms
+                self._last_audio_ts = time.time()
+
             if self.cfg.debug_audio:
-                rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
-                with self._rms_lock:
-                    self._last_rms = rms
-                    self._last_audio_ts = time.time()
+                print(f"[wake] rms={rms:.6f}")
 
             in_buf = np.concatenate((in_buf, mono), dtype=np.float32)
 
@@ -249,10 +260,10 @@ class OpenWakeWordEngine:
                 channels=1,
                 dtype="float32",
                 callback=audio_callback,
-                device=self.cfg.input_device,
+                device=None,
             ):
                 print(
-                    f"[wake] listening: device={self.cfg.input_device} "
+                    f"[wake] listening: device=DEFAULT "
                     f"in_rate={self.cfg.input_rate} -> sr={self.cfg.sr} "
                     f"chunk_ms={self.cfg.chunk_ms} thr={self.cfg.threshold}"
                 )
@@ -274,11 +285,15 @@ class OpenWakeWordEngine:
                         age = (now - ats) if ats else 999.0
                         print(f"[wake] audio_rms={rms:.6f} audio_age={age:.2f}s")
 
+                    # ===== BEGIN: chunk-synced RMS + debug + trigger =====
                     try:
                         pcm16 = self._chunk_q.get(timeout=0.35)
                     except queue.Empty:
                         continue
 
+                    # RMS computed from the SAME chunk we score (so score/rms never "desync")
+                    chunk_rms = float(np.sqrt(np.mean(np.square(pcm16.astype(np.float32))))) / 32768.0
+                   
                     if self._paused:
                         # keep latency low after resume
                         while not self._chunk_q.empty():
@@ -334,17 +349,37 @@ class OpenWakeWordEngine:
                         continue
 
                     # ---- DEBUG SCORE ----
-                    if self.cfg.debug_scores and (now - last_score_dbg) >= self.cfg.debug_every_s:
-                        last_score_dbg = now
-                        print(f"[wake] score={score:.3f}")
+                    now = time.time()
+                    if self.cfg.debug_scores:
+                        if not hasattr(self, "_last_dbg"):
+                            self._last_dbg = 0.0
+                        if now - self._last_dbg >= 1.0:
+                            print(
+                                f"[wake] dbg score={score:.3f} rms={chunk_rms:.4f} thr={self.cfg.threshold}",
+                                flush=True,
+                            )
+                            self._last_dbg = now
 
                     # ---- THRESHOLD CHECK ----
-                    if score >= self.cfg.threshold and (now - self._last_fire) >= self.cfg.cooldown_s:
+                    # reject one-frame spikes (mic bumps/clicks) by requiring 2-of-3 hits
+                    self._score_hist.append(score)
+                    hits = sum(1 for s in self._score_hist if s >= self.cfg.threshold)
+
+                    if hits >= self.cfg.trigger_hits_required and (now - self._last_fire) >= self.cfg.cooldown_s:
+                        # Gate on energy from the SAME chunk (chunk-synced)
+                        if chunk_rms < self.cfg.min_trigger_rms:
+                            continue
+
                         self._last_fire = now
-                        print(f"[wake] TRIGGER score={score:.3f} thr={self.cfg.threshold}")
+                        print(
+                            f"[wake] TRIGGER score={score:.3f} thr={self.cfg.threshold} rms={chunk_rms:.6f}",
+                            flush=True,
+                        )
                         try:
                             audio = np.array(self._pre_roll, dtype=np.int16)
-                            self._events.put_nowait(WakeResult(True, score, "embedding-threshold", audio=audio))
+                            self._events.put_nowait(
+                                WakeResult(True, score, "embedding-threshold", audio=audio)
+                            )
                         except queue.Full:
                             pass
 

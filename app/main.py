@@ -16,6 +16,37 @@ import sys, os
 import traceback
 
 
+def normalize_transcript_for_intent(text: str) -> str | None:
+    """
+    - If transcript is only the wake word, return None (drop).
+    - If transcript starts with the wake word, strip it.
+    """
+    if not text:
+        return None
+
+    raw = text.strip()
+    t = raw.lower().strip()
+
+    # comparison version with common punctuation removed
+    t_cmp = t.replace(",", "").replace(".", "").replace("!", "").replace("?", "").strip()
+
+    # Drop wake-only transcripts
+    if t_cmp in {"hey jared", "jared"}:
+        return None
+
+    # Strip wake prefix from commands
+    prefixes = ("hey jared", "hey, jared", "jared")
+    for p in prefixes:
+        if t.startswith(p):
+            raw = raw[len(p):].lstrip(" ,.!?").strip()
+            break
+
+    if len(raw) < 3:
+        return None
+    
+    return raw if raw else None
+
+
 def main():
     log = get_logger("JARED")
 
@@ -34,10 +65,14 @@ def main():
         router = IntentRouter()
 
         def on_transcript(evt):
-            text = evt.data.get("text", "").strip()
-            if not text:
+            raw_text = evt.data.get("text", "")
+            clean = normalize_transcript_for_intent(raw_text)
+            if clean is None:
+                log.info(f"[transcript] dropped wake-only: '{raw_text}'")
                 return
-            match = parse(text)
+
+            match = parse(clean)
+            
             bus.publish(
                 "nlp.intent",
                 name=match.name,
@@ -75,7 +110,6 @@ def main():
         else:
             wake_engine = OpenWakeWordEngine(
                 cfg=OpenWakeWordConfig(
-                    threshold=0.59,   # you liked this
                     cooldown_s=2.0,
                 )
             )

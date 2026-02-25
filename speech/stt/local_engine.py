@@ -30,11 +30,11 @@ class WhisperCppSTTEngine:
 
     sample_rate: int = 16000
     block_ms: int = 50  # smaller = snappier VAD loop
-    max_record_seconds: float = 10.0
+    max_record_seconds: float = 15.0
 
     # Silence-stop behavior
     silence_rms_threshold: float = 0.010   # tune if needed
-    silence_stop_ms: int = 900             # stop after this much silence post-speech
+    silence_stop_ms: int = 3555             # stop after this much silence post-speech
     min_speech_ms: int = 250               # require speech at least this long to accept
 
     language: str = "en"
@@ -148,7 +148,6 @@ class WhisperCppSTTEngine:
         - we detect continuous silence for silence_stop_ms,
         - OR we hit max_record_seconds
         """
-        print("[stt] listening...")
 
         frames: List[np.ndarray] = []
         heard_speech = False
