@@ -31,7 +31,6 @@ class VoicePipeline:
         )
 
     def stop(self) -> None:
-        # Stop both even if one throws
         try:
             self.wake.stop()
         finally:
@@ -43,21 +42,30 @@ class VoicePipeline:
         try:
             while True:
                 wr = self.wake.poll()
+
                 if not wr.triggered:
+                    time.sleep(self.idle_sleep_s)
                     continue
 
-                # ---- GATE WAKE WHILE STT RUNS (pause FIRST so we can't double-trigger) ----
+                # Gate wake while STT runs: pause FIRST so we can't double-trigger
                 if hasattr(self.wake, "pause"):
-                    self.wake.pause()   # type: ignore[attr-defined]
+                    self.wake.pause()  # type: ignore[attr-defined]
                 else:
                     self.wake.stop()
 
-                self.bus.publish("voice.wake", confidence=wr.confidence, reason=wr.reason)
+                self.bus.publish(
+                    "voice.wake",
+                    confidence=wr.confidence,
+                    reason=wr.reason,
+                )
+
+                if self.post_wake_delay_s > 0:
+                    time.sleep(self.post_wake_delay_s)
 
                 try:
                     tr = self.stt.transcribe_once(audio=wr.audio)
                 finally:
-                    # Optional: clear wake state so the same "hey jared" can't re-trigger
+                    # Clear wake state so the same "hey jared" can't instantly re-trigger
                     if hasattr(self.wake, "reset"):
                         self.wake.reset()  # type: ignore[attr-defined]
 
@@ -66,15 +74,13 @@ class VoicePipeline:
                     else:
                         self.wake.start()
 
-
-
                 self.bus.publish(
                     "voice.transcript",
                     text=tr.text,
                     confidence=tr.confidence,
                     final=tr.is_final,
                 )
+
         except KeyboardInterrupt:
             self.stop()
             raise
-

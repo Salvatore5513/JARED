@@ -177,6 +177,8 @@ class OpenWakeWordEngine:
         except queue.Empty:
             pass
 
+        self._pre_roll.clear()
+
         # Reset cooldown timer
         self._last_fire = time.time()
 
@@ -233,6 +235,13 @@ class OpenWakeWordEngine:
                 pcm16 = np.clip(block16 * 32767.0, -32768, 32767).astype(np.int16)
                 if pcm16.shape[0] != chunk_len_16k:
                     continue
+
+                self._pre_roll.extend(pcm16.tolist())
+
+                # cap pre-roll to max seconds worth
+                max_samples = int(self.cfg.pre_roll_s * self.cfg.sr)
+                if len(self._pre_roll) > max_samples:
+                    del self._pre_roll[: len(self._pre_roll) - max_samples]
 
                 try:
                     self._chunk_q.put_nowait(pcm16)
