@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / runtime
+logs/
+data/
+
+# Audio / models / binaries (local-only)
+*.wav
+*.mp3
+*.flac
+*.tflite
+*.onnx
+*.bin
+
+# Third-party heavy assets (keep folders, ignore contents)
+third_party/whispercpp*/
+third_party/whisper_models/
+third_party/**/*.exe
+third_party/**/*.dll
