@@ -236,12 +236,7 @@ class OpenWakeWordEngine:
                 if pcm16.shape[0] != chunk_len_16k:
                     continue
 
-                self._pre_roll.extend(pcm16.tolist())
-
-                # cap pre-roll to max seconds worth
-                max_samples = int(self.cfg.pre_roll_s * self.cfg.sr)
-                if len(self._pre_roll) > max_samples:
-                    del self._pre_roll[: len(self._pre_roll) - max_samples]
+                self._pre_roll.extend(pcm16)
 
                 try:
                     self._chunk_q.put_nowait(pcm16)
