@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol
 
 from devices.registry.models import DeviceRecord
-from devices.execution.action_request import ActionRequest
+from core.contracts.action_request import ActionRequest
 
 
 @dataclass

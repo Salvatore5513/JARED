@@ -7,7 +7,7 @@ import paho.mqtt.client as mqtt
 
 from devices.drivers.base import Driver, DriverResult
 from devices.registry.models import DeviceRecord
-from devices.execution.action_request import ActionRequest
+from core.contracts.action_request import ActionRequest
 
 
 class MQTTDriver(Driver):

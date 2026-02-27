@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 import time
 
-from devices.execution.action_request import AuthLevel
+from core.contracts.action_request import AuthLevel
 
 
 def _now_ms() -> int:

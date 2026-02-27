@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple
 
-from devices.execution.action_request import ActionRequest, PolicyDecision, SafetyClass, AuthLevel
+from core.contracts.action_request import ActionRequest, PolicyDecision, SafetyClass, AuthLevel
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,7 @@ class PolicyEngine:
         capability_ok: bool = True,
         slots_ok: bool = True,
         rate_limited: bool = False,
+        retry_in_ms: int = 0,
         now_ms: Optional[int] = None,
         # If you already have an auth-window module, you can pass its result here.
         auth_granted: bool = False,
@@ -110,10 +111,13 @@ class PolicyEngine:
             )
 
         if rate_limited:
+            extra = ""
+            if retry_in_ms and retry_in_ms > 0:
+                extra = f" Try again in {max(1, int(retry_in_ms / 1000))}s."
             return PolicyDecision(
                 allowed=False,
                 reason_code="DENY_RATE_LIMIT",
-                message="Too many commands too quickly.",
+                message="Too many commands too quickly." + extra,
                 required_auth=AuthLevel.NONE,
                 requires_verification=False,
             )

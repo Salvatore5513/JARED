@@ -303,6 +303,7 @@ class OpenWakeWordEngine:
                                 break
                         continue
 
+                    self._pre_roll.extend(pcm16)
 
 
                     # Feed audio into openwakeword feature ring buffer
@@ -380,6 +381,8 @@ class OpenWakeWordEngine:
                             self._events.put_nowait(
                                 WakeResult(True, score, "embedding-threshold", audio=audio)
                             )
+                            self._pre_roll.clear()
+                            self._score_hist.clear()
                         except queue.Full:
                             pass
 

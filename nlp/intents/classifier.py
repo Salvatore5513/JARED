@@ -1,16 +1,19 @@
 from __future__ import annotations
 import re
 from nlp.intents.schema import IntentMatch
+from typing import Optional
 
 
 def _norm(s: str) -> str:
     s = s.strip().lower()
-    s = re.sub(r"[^\w\s]", "", s)   # remove punctuation
-    return re.sub(r"\s+", " ", s)
+    s = re.sub(r"[^\w\s]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"^the\s+", "", s)
+    return s
 
 
 
-def classify(text: str) -> IntentMatch:
+def classify(text: str) -> Optional[IntentMatch]:
     t = _norm(text)
 
     # Media
@@ -34,7 +37,7 @@ def classify(text: str) -> IntentMatch:
         return IntentMatch("system.status", 0.8, {}, text)
 
 
-    # Devices (placeholders for Milestone 3)
+    # Pattern A: "turn on/off <target>"
     m = re.match(r"turn (on|off) (.+)", t)
     if m:
         return IntentMatch(
@@ -44,12 +47,22 @@ def classify(text: str) -> IntentMatch:
             text,
         )
 
-    # Garage quick-notes (future memory)
-    m = re.match(r"note (.+)", t)
+    # Pattern B: "turn <target> on/off" (what you said: "turn garage lights on")
+    m = re.match(r"turn (.+) (on|off)", t)
     if m:
-        return IntentMatch("garage.note", 0.8, {"text": m.group(1)}, text)
+        return IntentMatch(
+            "device.toggle",
+            0.85,
+            {"state": m.group(2), "target": m.group(1)},
+            text,
+        )
 
-    if t in {"help", "what can you do"}:
-        return IntentMatch("system.help", 0.9, {}, text)
-
-    return IntentMatch("unknown", 0.2, {}, text)
+    # Pattern C (optional): "switch <target> on/off"
+    m = re.match(r"switch (.+) (on|off)", t)
+    if m:
+        return IntentMatch(
+            "device.toggle",
+            0.85,
+            {"state": m.group(2), "target": m.group(1)},
+            text,
+        )

@@ -1,0 +1,426 @@
+# Execution spine (Milestone 3)
+
+1. System Purpose
+
+JARED is an offline-first voice assistant whose architecture guarantees:
+
+Deterministic execution flow
+
+Centralized safety enforcement
+
+No hidden side effects
+
+Explicit action contracts
+
+Observable event stream
+
+Replaceable drivers
+
+Extensible NLP layer
+
+No silent network usage
+
+Milestone 3 establishes the execution spine used by all future features.
+
+2. High Level Flow
+Wake → STT → Intent Parse → Router → ActionRequest →
+DeviceManager → PolicyEngine → RateLimit →
+Driver Execution → Verification → ActionOutcome →
+Router Feedback → TTS
+
+No module bypasses this chain.
+
+3. Core Design Principles
+3.1 Single Execution Authority
+
+All device actions MUST pass through:
+
+DeviceManager.handle()
+
+No driver calls anywhere else.
+
+3.2 Policy First
+
+PolicyEngine is the only authority for:
+
+Allowed vs denied
+
+Authentication requirements
+
+Verification requirements
+
+Offline enforcement
+
+Rate limiting enforcement
+
+DeviceManager executes decisions — it does not invent them.
+
+3.3 Immutable Input Contract
+
+ActionRequest is treated as immutable input.
+
+DeviceManager creates an enriched copy:
+
+req → req2
+
+with:
+
+resolved device_id
+
+resolved room_id
+
+auth_level snapshot
+
+Original request must never be mutated.
+
+Guardrail test enforces this.
+
+3.4 Explicit Outcomes
+
+Every action returns:
+
+ActionOutcome {
+  request
+  policy
+  execution_result
+  verification_result
+}
+
+verification_result MUST always exist after device resolution.
+
+4. Component Responsibilities
+4.1 Wake Engine
+
+Responsibilities:
+
+Detect wake phrase
+
+Emit wake event
+
+Provide pre-roll audio
+
+Never interpret commands
+
+Does NOT:
+
+Run STT
+
+Interpret intent
+
+Execute anything
+
+4.2 STT Engine
+
+Responsibilities:
+
+Convert speech → text
+
+Provide transcript only
+
+Does NOT:
+
+Interpret commands
+
+Execute actions
+
+4.3 NLP Parser / Classifier
+
+Responsibilities:
+
+Convert text → IntentMatch
+
+Provide:
+
+intent name
+
+confidence
+
+slots
+
+Must never:
+
+Execute anything
+
+Talk to devices
+
+Talk to network
+
+4.4 Intent Router
+
+Responsibilities:
+
+Accept parsed intent
+
+Construct ActionRequest
+
+Call DeviceManager
+
+Interpret ActionOutcome
+
+Provide user feedback
+
+Router NEVER:
+
+Calls drivers
+
+Applies safety logic
+
+Bypasses policy
+
+Mutates ActionRequest
+
+Router only orchestrates.
+
+4.5 ActionRequest
+
+Defines:
+
+intent_name
+slots
+source
+confidence
+safety_class
+auth_level
+device_id
+room_id
+
+Represents user intent — not execution result.
+
+4.6 DeviceManager
+
+THE execution orchestrator.
+
+Responsibilities:
+
+Resolve device
+
+Snapshot auth state
+
+Build req2
+
+Call PolicyEngine
+
+Apply rate limiting
+
+Execute driver
+
+Run verification
+
+Emit events
+
+Return ActionOutcome
+
+DeviceManager must:
+
+Never mutate req
+
+Never bypass policy
+
+Never bypass verification when required
+
+4.7 PolicyEngine
+
+Single authority for:
+
+allow/deny
+
+required_auth
+
+requires_verification
+
+rate limiting
+
+offline enforcement
+
+PolicyEngine never executes anything.
+
+4.8 RateLimiter
+
+Provides:
+
+RateLimitResult {
+  limited
+  retry_in_ms
+}
+
+Used only by DeviceManager → PolicyEngine.
+
+4.9 Drivers
+
+Drivers:
+
+Perform device I/O
+
+Return DriverResult
+
+Drivers MUST NOT:
+
+Talk to policy
+
+Talk to router
+
+Talk to auth
+
+Emit system events
+
+Drivers are pure execution.
+
+4.10 Verifier
+
+Responsibilities:
+
+Confirm execution success when required
+
+Return:
+
+VerificationResult {
+  verified
+  method
+  details
+  state
+}
+
+Verifier does not decide IF verification is required.
+Policy decides that.
+
+4.11 EventBus
+
+System observability layer.
+
+Used for:
+
+Logging
+
+Metrics
+
+Debugging
+
+Future automations
+
+EventBus must not affect execution decisions.
+
+4.12 http_client + NetPolicy
+
+All network calls must go through:
+
+http_client → NetPolicy
+
+NetPolicy decides:
+
+offline mode
+
+allowed hosts
+
+allowed ports
+
+http_client MUST fail if not configured.
+
+No direct requests allowed anywhere else.
+
+5. Verification Model
+
+If policy.requires_verification:
+
+Verifier must return:
+
+verified=True → success
+
+verified=False → router must not claim success
+
+Execution may still occur (Milestone 3 behavior).
+
+6. Safety Model
+
+SafetyClass defines risk level.
+
+Policy maps:
+
+SafetyClass → AuthLevel → Verification
+
+No module invents safety rules.
+
+7. Event Model
+
+DeviceManager emits:
+
+action.requested
+
+action.policy_decided
+
+action.executed
+
+action.verified
+
+action.failed
+
+Router emits user feedback.
+
+8. Non-Goals (Milestone 3)
+
+Not implemented yet:
+
+Learning
+
+Prediction
+
+Multi-step planning
+
+Memory reasoning
+
+Autonomous actions
+
+Cloud NLP
+
+Driver state feedback loops
+
+Architecture supports them later.
+
+9. Guardrails
+
+Must never break:
+
+ActionRequest immutability
+
+Policy first
+
+Single execution path
+
+NetPolicy enforcement
+
+Event emission consistency
+
+10. Future Expansion Points (Milestone 4+)
+
+Designed but not implemented:
+
+Skill registry
+
+Planning engine
+
+Persistent memory
+
+State reconciliation
+
+Device subscriptions
+
+Multi-user auth
+
+Context awareness
+
+Summary
+
+Milestone 3 establishes:
+
+A deterministic, auditable, safe execution pipeline.
+
+Everything else builds on this spine.
+
+If you want next, I can generate:
+
+docs/architecture/module_dependencies.md
+
+docs/architecture/event_flow.md
+
+docs/architecture/security_model.md
+
+docs/architecture/future_extensions.md

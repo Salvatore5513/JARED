@@ -67,7 +67,7 @@ class VoicePipeline:
                     time.sleep(self.post_wake_delay_s)
 
                 try:
-                    print("[stt] listening...", flush=True)
+                    self.bus.publish("stt.listening", phase="wake_stt")
 
                     tr = None
                     if self.skip_blank_audio:
@@ -75,7 +75,6 @@ class VoicePipeline:
                         if audio_i16 is None or len(audio_i16) == 0:
                             skip_reason = "no-audio"
                             self.bus.publish("stt.skipped", reason=skip_reason)
-                            print(f"[stt] skipped: {skip_reason}", flush=True)
                             tr = None
                         else:
                             # RMS in int16 units
@@ -83,7 +82,6 @@ class VoicePipeline:
                             if rms < self.min_stt_rms:
                                 skip_reason = "too-quiet"
                                 self.bus.publish("stt.skipped", reason=skip_reason, rms=rms)
-                                print(f"[stt] skipped: {skip_reason} rms={rms:.1f}", flush=True)
                                 tr = None
                             else:
                                 tr = self.stt.transcribe_once(audio=wr.audio)

@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 from core.observability.logger import get_logger
 
-from devices.execution.action_request import ActionRequest
+from core.contracts.action_request import ActionRequest
 from devices.registry.models import DeviceTarget
 from devices.execution.device_manager import DeviceManager
 
@@ -51,12 +51,10 @@ class IntentRouter:
         if name in {"device.toggle", "device.set_power"}:
             outcome = self._device_command(name=name, slots=slots, confidence=confidence)
 
-            # Keep your existing action log style:
             log.info(f"[action] {name} -> outcome.policy={outcome.policy.reason_code} allowed={outcome.policy.allowed}")
             if outcome.execution_result:
                 log.info(f"[action] exec -> {outcome.execution_result}")
 
-            # Milestone 3: human feedback (logged for now; later route to TTS)
             if not outcome.policy.allowed:
                 log.info(f"[say] {outcome.policy.message}")
                 return
@@ -64,6 +62,13 @@ class IntentRouter:
             if outcome.execution_result and not outcome.execution_result.get("ok", False):
                 log.info(f"[say] {outcome.execution_result.get('details', 'Execution failed.')}")
                 return
+
+            # ✅ NEW: verify gate
+            if outcome.policy.requires_verification:
+                vr = outcome.verification_result or {}
+                if not vr.get("verified", False):
+                    log.info("[say] I couldn't verify that it worked. Please check the device.")
+                    return
 
             log.info("[say] Done.")
             return
@@ -82,9 +87,14 @@ class IntentRouter:
 
         room_name, device_name = self._parse_target(target_text)
 
+        slots = {}
+        # Keep state only when it exists (toggle may not have one)
+        if state is not None:
+            slots["state"] = state
+
         req = ActionRequest(
-            intent_name="device.set_power",
-            slots={"state": state},
+            intent_name=name,   # ✅ keep original intent (device.toggle, device.set_power, etc.)
+            slots=slots,
             source="voice",
             confidence=confidence,
         )
@@ -119,10 +129,16 @@ class IntentRouter:
                     return parts[0], " ".join(parts[1:])
 
         # space-based fallback: last token(s) as device name, rest as room
-        parts = [p for p in t.split() if p]
+        parts = [p for p in t.split() if p and p.lower() not in {"the", "a", "an", "my"}]
+
         if len(parts) == 1:
             return None, parts[0]
-        return " ".join(parts[:-1]), parts[-1]
+
+        if len(parts) == 2:
+            return parts[0], parts[1]
+
+        # 3+ words: first token is room, rest is the device name
+        return parts[0], " ".join(parts[1:])
 
     # -------------------------
     # Existing handlers (stubs)
