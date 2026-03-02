@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from core.observability.logger import get_logger
-
+from core.event_bus import EventBus
 from core.contracts.action_request import ActionRequest
 from devices.registry.models import DeviceTarget
 from devices.execution.device_manager import DeviceManager
@@ -12,8 +12,9 @@ log = get_logger("JARED")
 
 
 class IntentRouter:
-    def __init__(self, *, device_manager: DeviceManager):
+    def __init__(self, *, device_manager: DeviceManager, bus: EventBus):
         self.device_manager = device_manager
+        self.bus = bus
 
     def handle(self, name: str, confidence: float, slots: dict, raw_text: str) -> None:
         # Basic guardrail
@@ -56,24 +57,31 @@ class IntentRouter:
                 log.info(f"[action] exec -> {outcome.execution_result}")
 
             if not outcome.policy.allowed:
-                log.info(f"[say] {outcome.policy.message}")
+                self._say(outcome.policy.message)
                 return
 
             if outcome.execution_result and not outcome.execution_result.get("ok", False):
-                log.info(f"[say] {outcome.execution_result.get('details', 'Execution failed.')}")
+                self._say(outcome.execution_result.get('details', 'Execution failed.'))
                 return
 
             # ✅ NEW: verify gate
             if outcome.policy.requires_verification:
                 vr = outcome.verification_result or {}
                 if not vr.get("verified", False):
-                    log.info("[say] I couldn't verify that it worked. Please check the device.")
+                    self._say("I couldn't verify that it worked. Please check the device.")
                     return
 
-            log.info("[say] Done.")
+            self._say("Done.")
             return
 
         log.info(f"[router] unhandled intent: {name} ({confidence:.2f}) '{raw_text}'")
+
+    def _say(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        # Semantic event: “assistant intends to say this”
+        self.bus.publish("assistant.say", text=text)
 
     # -------------------------
     # Milestone 3 device path

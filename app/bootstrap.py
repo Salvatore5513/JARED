@@ -25,6 +25,7 @@ from nlp.intents.router import IntentRouter
 
 from speech.pipeline import VoicePipeline
 from speech.stt.local_engine import WhisperCppSTTEngine
+from speech.tts.voice_output_service import VoiceOutputService
 from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordConfig, OpenWakeWordEngine
 
 DB_PATH = os.getenv("JARED_DB_PATH", "data/jared.db")
@@ -33,6 +34,7 @@ DB_PATH = os.getenv("JARED_DB_PATH", "data/jared.db")
 @dataclass
 class Runtime:
     voice: VoicePipeline
+    voice_output: VoiceOutputService
 
     def run_forever(self) -> None:
         self.voice.run_forever()
@@ -143,7 +145,7 @@ def build_runtime() -> Runtime:
 
     # Milestone 3 wiring
     device_manager = build_device_manager(bus, offline_only=offline_only)
-    router = IntentRouter(device_manager=device_manager)
+    router = IntentRouter(device_manager=device_manager, bus=bus)
 
     def on_transcript(evt):
         raw_text = evt.data.get("text", "")
@@ -199,6 +201,12 @@ def build_runtime() -> Runtime:
     bus.subscribe("stt.listening", on_stt_listening)
     bus.subscribe("stt.skipped", on_stt_skipped)
 
+    # ---- TTS Voice Output Service ----
+    voice_output = VoiceOutputService(bus=bus)
+    voice_output.start()
+
+    bus.publish("assistant.say", text="JARED voice output online.")
+
     # Wake engine selection:
     # - default: openWakeWord (your .tflite)
     # - set JARED_WAKE_ENGINE=dev to force dev mode wake
@@ -215,4 +223,4 @@ def build_runtime() -> Runtime:
         log.info("Wake engine: openWakeWord (.tflite)")
 
     vp = VoicePipeline(bus=bus, wake=wake_engine, stt=WhisperCppSTTEngine())
-    return Runtime(voice=vp)
+    return Runtime(voice=vp, voice_output=voice_output)
