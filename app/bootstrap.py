@@ -3,33 +3,29 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from core.config.manager import load_config
 from core.event_bus import EventBus
 from core.net import http_client
 from core.net.policy import NetPolicy
 from core.observability.healthcheck import run_healthcheck
 from core.observability.logger import get_logger
-from core.config.manager import load_config
+from core.security.audit_log import AuditLog
+from core.security.auth.auth_window import AuthWindow
+from core.security.policy_engine import PolicyEngine
+from core.security.rate_limits import RateLimiter
+from core.state.context_service import ContextService
 
-from speech.pipeline import VoicePipeline
-from speech.stt.local_engine import WhisperCppSTTEngine
-from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordEngine, OpenWakeWordConfig
+from devices.drivers.mqtt.driver import MQTTDriver
+from devices.drivers.registry import DriverRegistry
+from devices.execution.device_manager import DeviceManager
+from devices.registry.store import RegistryStore
 
 from nlp.intents.parser import parse
 from nlp.intents.router import IntentRouter
 
-# Milestone 3 wiring
-from core.security.audit_log import AuditLog
-from core.security.rate_limits import RateLimiter
-from core.security.policy_engine import PolicyEngine
-from core.security.auth.auth_window import AuthWindow
-
-from devices.registry.store import RegistryStore
-from devices.drivers.registry import DriverRegistry
-from devices.execution.device_manager import DeviceManager
-
-# Driver(s)
-from devices.drivers.mqtt.driver import MQTTDriver
-
+from speech.pipeline import VoicePipeline
+from speech.stt.local_engine import WhisperCppSTTEngine
+from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordConfig, OpenWakeWordEngine
 
 DB_PATH = os.getenv("JARED_DB_PATH", "data/jared.db")
 
@@ -122,18 +118,46 @@ def build_runtime() -> Runtime:
 
     bus = EventBus()
 
+    # Context spine (Milestone 3)
+    context = ContextService()
+
+    # Context subscribes to all relevant event domains
+    bus.subscribe("voice.wake*", context.handle_bus_event)
+    bus.subscribe("stt.*", context.handle_bus_event)
+    bus.subscribe("action.*", context.handle_bus_event)
+    bus.subscribe("tts.*", context.handle_bus_event)
+
+    # Optional: log context changes while you bring this online
+    _ctx_last = {"mode": None, "busy": None, "intent": None, "device": None}
+
+    def _log_ctx(s):
+        key = (s.mode, s.busy, s.last_intent_name, s.last_device_id)
+        prev = (_ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"])
+        if key == prev:
+            return
+
+        _ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"] = key
+        log.info(f"[ctx] mode={s.mode} busy={s.busy} intent={s.last_intent_name} device={s.last_device_id}")
+
+    context.add_listener(_log_ctx)
+
     # Milestone 3 wiring
     device_manager = build_device_manager(bus, offline_only=offline_only)
     router = IntentRouter(device_manager=device_manager)
 
     def on_transcript(evt):
         raw_text = evt.data.get("text", "")
+
         clean = normalize_transcript_for_intent(raw_text)
         if clean is None:
             log.info(f"[transcript] dropped wake-only: '{raw_text}'")
             return
 
         match = parse(clean)
+        if match is None:
+            log.info(f"[nlp] no match for: '{clean}'")
+            return
+
         bus.publish(
             "nlp.intent",
             name=match.name,
@@ -158,6 +182,7 @@ def build_runtime() -> Runtime:
     # Optional: subscribe to STT events now that the pipeline publishes them
     def on_stt_listening(evt):
         log.info("[stt] listening...")
+        # ContextService receives this via bus wildcard subscription (stt.*)
 
     def on_stt_skipped(evt):
         reason = evt.data.get("reason", "unknown")
@@ -167,7 +192,9 @@ def build_runtime() -> Runtime:
         else:
             log.info(f"[stt] skipped: {reason} rms={rms:.1f}")
 
+
     bus.subscribe("voice.transcript", on_transcript)
+    bus.subscribe("nlp.intent", context.handle_bus_event)
     bus.subscribe("nlp.intent", on_intent)
     bus.subscribe("stt.listening", on_stt_listening)
     bus.subscribe("stt.skipped", on_stt_skipped)

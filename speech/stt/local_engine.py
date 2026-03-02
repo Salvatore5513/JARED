@@ -33,8 +33,8 @@ class WhisperCppSTTEngine:
     max_record_seconds: float = 15.0
 
     # Silence-stop behavior
-    silence_rms_threshold: float = 0.010   # tune if needed
-    silence_stop_ms: int = 3555             # stop after this much silence post-speech
+    silence_rms_threshold: float = 0.010  # tune if needed
+    silence_stop_ms: int = 555             # stop after this much silence post-speech
     min_speech_ms: int = 250               # require speech at least this long to accept
 
     language: str = "en"
@@ -154,6 +154,12 @@ class WhisperCppSTTEngine:
         speech_blocks = 0
         silence_blocks = 0
 
+        # Noise floor tracking (fan noise becomes baseline)
+        noise_floor = 0.0
+        noise_alpha = 0.10         # smoothing factor (0.05–0.15 is reasonable)
+        speech_margin = 0.010      # how much above noise floor counts as speech
+        min_speech_threshold = 0.010  # never go below this
+
         with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32") as stream:
             for _ in range(self._max_blocks):
                 data, _ = stream.read(self._block)   # shape: (block, 1)
@@ -162,7 +168,17 @@ class WhisperCppSTTEngine:
 
                 level = _rms(x)
 
-                if level >= self.silence_rms_threshold:
+                # Update noise floor only while we haven't committed to "heard speech"
+                # (so speech doesn't drag the floor up)
+                if not heard_speech:
+                    if noise_floor == 0.0:
+                        noise_floor = level
+                    else:
+                        noise_floor = (1.0 - noise_alpha) * noise_floor + noise_alpha * level
+
+                dyn_thresh = max(min_speech_threshold, noise_floor + speech_margin)
+
+                if level >= dyn_thresh:
                     heard_speech = True
                     speech_blocks += 1
                     silence_blocks = 0
