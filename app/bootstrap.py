@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-
 from core.config.manager import load_config
 from core.event_bus import EventBus
 from core.net import http_client
@@ -28,16 +26,10 @@ from speech.stt.local_engine import WhisperCppSTTEngine
 from speech.tts.voice_output_service import VoiceOutputService
 from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordConfig, OpenWakeWordEngine
 
+from app.runtime import Runtime
+
+
 DB_PATH = os.getenv("JARED_DB_PATH", "data/jared.db")
-
-
-@dataclass
-class Runtime:
-    voice: VoicePipeline
-    voice_output: VoiceOutputService
-
-    def run_forever(self) -> None:
-        self.voice.run_forever()
 
 
 def normalize_transcript_for_intent(text: str) -> str | None:
@@ -99,7 +91,6 @@ def build_device_manager(bus: EventBus, *, offline_only: bool) -> DeviceManager:
 
 def build_runtime() -> Runtime:
     log = get_logger("JARED")
-
     log.info("Boot sequence started")
 
     cfg = load_config()
@@ -128,6 +119,7 @@ def build_runtime() -> Runtime:
     bus.subscribe("stt.*", context.handle_bus_event)
     bus.subscribe("action.*", context.handle_bus_event)
     bus.subscribe("tts.*", context.handle_bus_event)
+    bus.subscribe("nlp.intent", context.handle_bus_event)
 
     # Optional: log context changes while you bring this online
     _ctx_last = {"mode": None, "busy": None, "intent": None, "device": None}
@@ -137,7 +129,6 @@ def build_runtime() -> Runtime:
         prev = (_ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"])
         if key == prev:
             return
-
         _ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"] = key
         log.info(f"[ctx] mode={s.mode} busy={s.busy} intent={s.last_intent_name} device={s.last_device_id}")
 
@@ -149,7 +140,6 @@ def build_runtime() -> Runtime:
 
     def on_transcript(evt):
         raw_text = evt.data.get("text", "")
-
         clean = normalize_transcript_for_intent(raw_text)
         if clean is None:
             log.info(f"[transcript] dropped wake-only: '{raw_text}'")
@@ -169,7 +159,6 @@ def build_runtime() -> Runtime:
         )
 
     def on_intent(evt):
-        # keep your intent log
         log.info(
             f"[intent] {evt.data['name']} ({evt.data['confidence']:.2f}) "
             f"slots={evt.data['slots']} | '{evt.data['raw_text']}'"
@@ -181,46 +170,52 @@ def build_runtime() -> Runtime:
             raw_text=evt.data["raw_text"],
         )
 
-    # Optional: subscribe to STT events now that the pipeline publishes them
-    def on_stt_listening(evt):
+    def on_stt_listening(_evt):
         log.info("[stt] listening...")
-        # ContextService receives this via bus wildcard subscription (stt.*)
 
     def on_stt_skipped(evt):
         reason = evt.data.get("reason", "unknown")
-        rms = evt.data.get("rms", None)
+        rms = evt.data.get("rms")
         if rms is None:
             log.info(f"[stt] skipped: {reason}")
         else:
             log.info(f"[stt] skipped: {reason} rms={rms:.1f}")
 
-
     bus.subscribe("voice.transcript", on_transcript)
-    bus.subscribe("nlp.intent", context.handle_bus_event)
     bus.subscribe("nlp.intent", on_intent)
     bus.subscribe("stt.listening", on_stt_listening)
     bus.subscribe("stt.skipped", on_stt_skipped)
 
     # ---- TTS Voice Output Service ----
     voice_output = VoiceOutputService(bus=bus)
-    voice_output.start()
 
-    bus.publish("assistant.say", text="JARED voice output online.")
+    disable_tts = os.getenv("JARED_TTS_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}
+    if disable_tts:
+        log.warning("[tts] disabled by env (JARED_TTS_DISABLE=1)")
+        bus.publish("tts.unavailable", reason="disabled_by_env")
+        voice_output = None  # type: ignore[assignment]
+    else:
+        try:
+            voice_output.start()
+            bus.publish("assistant.say", text="JARED voice output online.")
+        except Exception as e:
+            log.warning(f"[tts] unavailable: {e!r}")
+            bus.publish("tts.unavailable", reason=str(e))
+            voice_output = None  # type: ignore[assignment]
 
-    # Wake engine selection:
-    # - default: openWakeWord (your .tflite)
-    # - set JARED_WAKE_ENGINE=dev to force dev mode wake
+    # Wake engine selection
     wake_choice = os.getenv("JARED_WAKE_ENGINE", "").strip().lower()
     if wake_choice in {"dev", "keyword", "stdin"}:
         wake_engine = KeywordWakeEngine()
         log.info("Wake engine: DEV (stdin trigger)")
     else:
-        wake_engine = OpenWakeWordEngine(
-            cfg=OpenWakeWordConfig(
-                cooldown_s=2.0,
-            )
-        )
+        wake_engine = OpenWakeWordEngine(cfg=OpenWakeWordConfig(cooldown_s=2.0))
         log.info("Wake engine: openWakeWord (.tflite)")
 
     vp = VoicePipeline(bus=bus, wake=wake_engine, stt=WhisperCppSTTEngine())
-    return Runtime(voice=vp, voice_output=voice_output)
+
+    return Runtime(
+        bus=bus,
+        voice=vp,
+        voice_output=voice_output,
+    )

@@ -24,8 +24,11 @@ class EventBus:
 
     Topics are dotted strings: "voice.wake", "voice.transcript", etc.
 
-    Wildcards:
-      - Subscribe to "voice.*" to receive any event whose topic starts with "voice."
+    Supported subscription patterns:
+      - Exact:         "voice.wake"
+      - Head wildcard: "voice.*"          (matches "voice.<anything>")
+      - Prefix glob:   "voice.wake*"      (matches "voice.wake", "voice.wake.detected", etc.)
+      - All:           "*"                (matches everything)
     """
 
     def __init__(self) -> None:
@@ -51,17 +54,36 @@ class EventBus:
 
         # Copy handlers under lock; execute outside lock
         with self._lock:
-            exact = list(self._subs.get(topic, []))
-            wildcard = list(self._subs.get(self._wildcard(topic), []))
+            subs_snapshot = list(self._subs.items())
 
-        self._fanout(evt, exact)
-        self._fanout(evt, wildcard)
+        matched: list[Handler] = []
+        for pattern, handlers in subs_snapshot:
+            if self._matches(pattern, topic):
+                matched.extend(handlers)
+
+        self._fanout(evt, matched)
 
     @staticmethod
-    def _wildcard(topic: str) -> str:
-        # "voice.wake" -> "voice.*"
-        head = topic.split(".", 1)[0]
-        return f"{head}.*"
+    def _matches(pattern: str, topic: str) -> bool:
+        # "*" = everything
+        if pattern == "*":
+            return True
+
+        # exact match
+        if pattern == topic:
+            return True
+
+        # head wildcard: "voice.*" => matches "voice.<anything>"
+        if pattern.endswith(".*"):
+            prefix = pattern[:-1]  # "voice."
+            return topic.startswith(prefix)
+
+        # prefix glob: "voice.wake*" => matches anything starting with "voice.wake"
+        if pattern.endswith("*"):
+            prefix = pattern[:-1]
+            return topic.startswith(prefix)
+
+        return False
 
     @staticmethod
     def _fanout(evt: Event, handlers: Iterable[Handler]) -> None:
@@ -69,6 +91,5 @@ class EventBus:
             try:
                 h(evt)
             except Exception:
-                # local-only: print is acceptable for now; later route to observability logger
                 print(f"[EventBus] handler error (topic={evt.topic})")
                 traceback.print_exc()

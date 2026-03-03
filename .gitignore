@@ -34,3 +34,5 @@ third_party/whispercpp*/
 third_party/whisper_models/
 third_party/**/*.exe
 third_party/**/*.dll
+
+line_count.txt
