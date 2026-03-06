@@ -113,6 +113,21 @@ class RegistryStore:
             if not row:
                 return None
             return Room(room_id=row["room_id"], name=row["name"])
+        
+    def get_template_by_name(self, template_name: str) -> Optional[DeviceTemplate]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT template_id, name, driver_kind, capabilities_json FROM device_templates WHERE lower(name)=lower(?)",
+                (template_name,),
+            ).fetchone()
+            if not row:
+                return None
+            return DeviceTemplate(
+                template_id=row["template_id"],
+                name=row["name"],
+                driver_kind=row["driver_kind"],
+                capabilities=self._loads(row["capabilities_json"]),
+            )
 
     # -----------------------------
     # Templates
@@ -204,6 +219,124 @@ class RegistryStore:
                 driver_config=self._loads(row["driver_config_json"]),
                 enabled=bool(row["enabled"]),
             )
+        
+    def list_devices(self, *, enabled_only: bool = False) -> List[DeviceRecord]:
+        with self._connect() as conn:
+            if enabled_only:
+                rows = conn.execute(
+                    """
+                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
+                        t.driver_kind, t.capabilities_json
+                    FROM devices d
+                    JOIN device_templates t ON t.template_id = d.template_id
+                    WHERE d.enabled=1
+                    ORDER BY d.room_id, d.name
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
+                        t.driver_kind, t.capabilities_json
+                    FROM devices d
+                    JOIN device_templates t ON t.template_id = d.template_id
+                    ORDER BY d.room_id, d.name
+                    """
+                ).fetchall()
+
+            out: List[DeviceRecord] = []
+            for row in rows:
+                out.append(
+                    DeviceRecord(
+                        device_id=row["device_id"],
+                        name=row["name"],
+                        room_id=row["room_id"],
+                        template_id=row["template_id"],
+                        driver_kind=row["driver_kind"],
+                        capabilities=self._loads(row["capabilities_json"]),
+                        driver_config=self._loads(row["driver_config_json"]),
+                        enabled=bool(row["enabled"]),
+                    )
+                )
+            return out
+        
+    def resolve_candidates(self, target: DeviceTarget) -> List[DeviceRecord]:
+        """
+        Return all enabled devices matching the target.
+        Used so DeviceManager can detect ambiguity instead of silently picking one.
+        """
+        out: List[DeviceRecord] = []
+
+        # 1) Direct by device_id
+        if target.device_id:
+            rec = self.get_device(target.device_id)
+            if rec and rec.enabled:
+                out.append(rec)
+            return out
+
+        if not target.device_name:
+            return out
+
+        wanted = str(target.device_name or "").strip().lower()
+
+        # Resolve room (optional)
+        room_id = target.room_id
+        if not room_id and target.room_name:
+            room = self.get_room_by_name(target.room_name)
+            room_id = room.room_id if room else None
+
+        with self._connect() as conn:
+            if room_id:
+                rows = conn.execute(
+                    """
+                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
+                           t.driver_kind, t.capabilities_json
+                    FROM devices d
+                    JOIN device_templates t ON t.template_id = d.template_id
+                    WHERE d.enabled=1 AND d.room_id=?
+                    ORDER BY d.name
+                    """,
+                    (room_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
+                           t.driver_kind, t.capabilities_json
+                    FROM devices d
+                    JOIN device_templates t ON t.template_id = d.template_id
+                    WHERE d.enabled=1
+                    ORDER BY d.room_id, d.name
+                    """
+                ).fetchall()
+
+            exact = []
+            suffix = []
+
+            for r in rows:
+                name_l = str(r["name"] or "").strip().lower()
+                if name_l == wanted:
+                    exact.append(r)
+                elif name_l.endswith(" " + wanted):
+                    suffix.append(r)
+
+            chosen = exact if exact else suffix
+
+            for row in chosen:
+                out.append(
+                    DeviceRecord(
+                        device_id=row["device_id"],
+                        name=row["name"],
+                        room_id=row["room_id"],
+                        template_id=row["template_id"],
+                        driver_kind=row["driver_kind"],
+                        capabilities=self._loads(row["capabilities_json"]),
+                        driver_config=self._loads(row["driver_config_json"]),
+                        enabled=bool(row["enabled"]),
+                    )
+                )
+
+        return out
 
     def resolve_device(self, target: DeviceTarget) -> Optional[DeviceRecord]:
         """
@@ -212,58 +345,7 @@ class RegistryStore:
           - Else resolve room (room_id or room_name) and device_name
         """
         # 1) Direct by device_id
-        if target.device_id:
-            rec = self.get_device(target.device_id)
-            if rec and rec.enabled:
-                return rec
-            return None
-
-        # Need at least a device name for name-based lookup
-        if not target.device_name:
-            return None
-
-        # Resolve room (optional, but strongly preferred)
-        room_id = target.room_id
-        if not room_id and target.room_name:
-            room = self.get_room_by_name(target.room_name)
-            room_id = room.room_id if room else None
-
-        with self._connect() as conn:
-            if room_id:
-                row = conn.execute(
-                    """
-                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
-                           t.driver_kind, t.capabilities_json
-                    FROM devices d
-                    JOIN device_templates t ON t.template_id = d.template_id
-                    WHERE d.enabled=1 AND d.room_id=? AND lower(d.name)=lower(?)
-                    """,
-                    (room_id, target.device_name),
-                ).fetchone()
-            else:
-                # No room given: allow global lookup by unique device name (first match)
-                row = conn.execute(
-                    """
-                    SELECT d.device_id, d.name, d.room_id, d.template_id, d.driver_config_json, d.enabled,
-                           t.driver_kind, t.capabilities_json
-                    FROM devices d
-                    JOIN device_templates t ON t.template_id = d.template_id
-                    WHERE d.enabled=1 AND lower(d.name)=lower(?)
-                    LIMIT 1
-                    """,
-                    (target.device_name,),
-                ).fetchone()
-
-            if not row:
-                return None
-
-            return DeviceRecord(
-                device_id=row["device_id"],
-                name=row["name"],
-                room_id=row["room_id"],
-                template_id=row["template_id"],
-                driver_kind=row["driver_kind"],
-                capabilities=self._loads(row["capabilities_json"]),
-                driver_config=self._loads(row["driver_config_json"]),
-                enabled=bool(row["enabled"]),
-            )
+        matches = self.resolve_candidates(target)
+        if len(matches) == 1:
+            return matches[0]
+        return None

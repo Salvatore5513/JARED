@@ -11,6 +11,7 @@ class EventBridge(QObject):
 
     def __init__(self, bus):
         super().__init__()
+        self.bus = bus
         self._bus = bus
         # Subscribe to everything for logs + routing
         self._bus.subscribe("*", self._on_event)
@@ -19,3 +20,4 @@ class EventBridge(QObject):
         # evt is your Event dataclass instance
         # emit payload as a plain dict (Qt-friendly)
         self.event_received.emit(evt.topic, dict(evt.data))
+        

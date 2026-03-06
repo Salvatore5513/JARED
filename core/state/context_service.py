@@ -54,22 +54,29 @@ class ContextService:
 
         # Simple mapping from event types to handlers
         self._handlers: Dict[str, Callable[[Dict[str, Any]], None]] = {
-            # Your real STT topics
+            # STT
             "stt.listening": self._on_stt_started,
             "stt.skipped": self._on_stt_cancelled,
 
-            # Your real NLP topic
+            # NLP
             "nlp.intent": self._on_intent_recognized,
 
-            # Action events (we will wire these next)
-            "action.started": self._on_action_started,
+            # Real action lifecycle
+            "action.requested": self._on_action_started,
+            "action.executed": self._on_action_progress,
             "action.verified": self._on_action_finished,
             "action.failed": self._on_action_finished,
 
-            # Future TTS support
+            # Clarification path
+            "action.clarification_required": self._on_clarification_required,
+
+            # Speech output
+            "assistant.say": self._on_assistant_say,
             "tts.started": self._on_tts_started,
             "tts.completed": self._on_tts_completed,
+            "tts.failed": self._on_tts_cancelled,
             "tts.cancelled": self._on_tts_cancelled,
+            "tts.unavailable": self._on_tts_cancelled,
         }
 
     # -----------------------------
@@ -194,12 +201,29 @@ class ContextService:
         self._set_mode(ContextMode.WORKING)
         self._set_busy(True)
 
+    def _on_action_progress(self, payload: Dict[str, Any]) -> None:
+        self._set_mode(ContextMode.WORKING)
+        self._set_busy(True)
+
     def _on_action_finished(self, payload: Dict[str, Any]) -> None:
         self._state.last_action_end_at = time.time()
         # After action completes, we’re usually about to speak confirmation OR return to idle.
         # Don’t force SPEAKING here; let tts.started do that.
         self._set_busy(False)
         self._set_mode(ContextMode.IDLE)
+
+    def _on_clarification_required(self, payload: Dict[str, Any]) -> None:
+        # We are no longer actively listening, and we are waiting on the user.
+        # This should not leave the UI stuck in "processing".
+        self._set_busy(False)
+        self._set_mode(ContextMode.IDLE)
+
+    def _on_assistant_say(self, payload: Dict[str, Any]) -> None:
+        # If TTS starts, that will move us to SPEAKING.
+        # If TTS does not start, we still should not remain stuck in WORKING.
+        if self._state.mode == ContextMode.WORKING:
+            self._set_busy(False)
+            self._set_mode(ContextMode.IDLE)
 
     def _on_tts_started(self, payload: Dict[str, Any]) -> None:
         self._state.last_tts_start_at = time.time()

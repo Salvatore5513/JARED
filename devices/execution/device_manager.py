@@ -50,11 +50,46 @@ class DeviceManager:
         self._emit("action.requested", {"request": asdict(req), "target": asdict(target)})
 
         # 1) resolve device
-        device = self.registry.resolve_device(target)
+        matches = self.registry.resolve_candidates(target)
+
+        if len(matches) > 1:
+            options = [f"{d.room_id}:{d.name}" for d in matches]
+            message = f"I found multiple matches for {target.device_name}. Which one did you mean?"
+
+            decision = PolicyDecision(
+                allowed=False,
+                reason_code="AMBIGUOUS_DEVICE",
+                message=message,
+                required_auth=AuthLevel.NONE,
+                requires_verification=False,
+            )
+
+            self._audit_policy(req, decision)
+            self._emit(
+                "action.failed",
+                {
+                    "request_id": req.request_id,
+                    "stage": "resolve",
+                    "code": "AMBIGUOUS_DEVICE",
+                    "details": message,
+                    "candidates": options,
+                },
+            )
+            return ActionOutcome(request=req, policy=decision)
+
+        device = matches[0] if matches else None
         if not device:
             decision = self.policy.decide(req, offline_only=self.offline_only, device_known=False)
             self._audit_policy(req, decision)
-            self._emit("action.failed", {"request_id": req.request_id, "stage": "resolve", "code": decision.reason_code, "details": decision.message})
+            self._emit(
+                "action.failed",
+                {
+                    "request_id": req.request_id,
+                    "stage": "resolve",
+                    "code": decision.reason_code,
+                    "details": decision.message,
+                },
+            )
             return ActionOutcome(request=req, policy=decision)
 
 

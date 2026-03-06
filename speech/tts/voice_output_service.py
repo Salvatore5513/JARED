@@ -54,9 +54,12 @@ class VoiceOutputService:
                 continue
 
             print(f"[say] {text}")
+            self.bus.publish("tts.started", text=text)
 
             try:
                 res = self._renderer.render(TTSRequest(text=text, language=item.get("language", "en")))
                 self._player.play_wav(res.wav_path)
+                self.bus.publish("tts.completed", text=text)
             except Exception as e:
+                self.bus.publish("tts.failed", text=text, reason=repr(e))
                 print("[VoiceOutputService] error:", repr(e))

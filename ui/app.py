@@ -26,6 +26,9 @@ def launch_ui(runtime) -> int:
     bridge = EventBridge(runtime.bus)
     win = MainWindow(bridge)
     win.show()
+    runtime.bus.publish("ui.dashboard.refresh")
+
+    QTimer.singleShot(0, lambda: runtime.bus.publish("ui.devices.refresh"))
 
     def shutdown() -> None:
         try:

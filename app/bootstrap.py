@@ -12,7 +12,7 @@ from core.security.auth.auth_window import AuthWindow
 from core.security.policy_engine import PolicyEngine
 from core.security.rate_limits import RateLimiter
 from core.state.context_service import ContextService
-
+from dataclasses import asdict, is_dataclass, fields
 from devices.drivers.mqtt.driver import MQTTDriver
 from devices.drivers.registry import DriverRegistry
 from devices.execution.device_manager import DeviceManager
@@ -25,7 +25,7 @@ from speech.pipeline import VoicePipeline
 from speech.stt.local_engine import WhisperCppSTTEngine
 from speech.tts.voice_output_service import VoiceOutputService
 from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordConfig, OpenWakeWordEngine
-
+from typing import Any, Iterable, Mapping, Sequence, cast
 from app.runtime import Runtime
 
 
@@ -88,6 +88,71 @@ def build_device_manager(bus: EventBus, *, offline_only: bool) -> DeviceManager:
         offline_only=offline_only,
     )
 
+def _safe_serialize(obj: Any) -> Any:
+    if obj is None:
+        return None
+
+    # dataclass -> dict (manual; avoids asdict() type-checker issues)
+    if is_dataclass(obj):
+        try:
+            out: dict[str, Any] = {}
+            for f in fields(obj):
+                out[f.name] = _safe_serialize(getattr(obj, f.name))
+            return out
+        except Exception:
+            return repr(obj)
+
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, Mapping):
+        return {str(k): _safe_serialize(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_safe_serialize(x) for x in obj]
+
+    # Generic iterable (but NOT strings/bytes/dicts handled above)
+    if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+        try:
+            return [_safe_serialize(x) for x in obj]
+        except Exception:
+            return repr(obj)
+
+    return repr(obj)
+
+
+def _registry_list_devices(registry: Any) -> list[Any]:
+    candidates = (
+        "list_devices",
+        "all_devices",
+        "get_all_devices",
+        "get_devices",
+        "devices",
+        "list",
+    )
+
+    for name in candidates:
+        if not hasattr(registry, name):
+            continue
+
+        attr = getattr(registry, name)
+
+        try:
+            res = attr() if callable(attr) else attr
+        except Exception:
+            continue
+
+        if res is None:
+            continue
+
+        # Pylance-safe: only list() things that are actually iterable
+        if isinstance(res, (list, tuple)):
+            return list(res)
+
+        if isinstance(res, Iterable) and not isinstance(res, (str, bytes, Mapping)):
+            return list(cast(Iterable[Any], res))
+
+    return []
 
 def build_runtime() -> Runtime:
     log = get_logger("JARED")
@@ -134,9 +199,26 @@ def build_runtime() -> Runtime:
 
     context.add_listener(_log_ctx)
 
+    def _publish_ctx(s):
+        bus.publish(
+            "ui.context.state",
+            mode=str(s.mode),
+            busy=bool(s.busy),
+            intent=s.last_intent_name,
+            device=s.last_device_id,
+        )
+
+    context.add_listener(_publish_ctx)
+
     # Milestone 3 wiring
     device_manager = build_device_manager(bus, offline_only=offline_only)
     router = IntentRouter(device_manager=device_manager, bus=bus)
+
+    def on_ui_devices_refresh(_evt):
+        devices = device_manager.registry.list_devices()
+        bus.publish("ui.devices.snapshot", devices=_safe_serialize(devices))
+
+    bus.subscribe("ui.devices.refresh", on_ui_devices_refresh)
 
     def on_transcript(evt):
         raw_text = evt.data.get("text", "")
@@ -147,6 +229,12 @@ def build_runtime() -> Runtime:
 
         match = parse(clean)
         if match is None:
+            if router.has_pending_clarification():
+                handled = router.handle_clarification_reply(clean)
+                if handled:
+                    log.info(f"[nlp] clarification reply handled: '{clean}'")
+                    return
+
             log.info(f"[nlp] no match for: '{clean}'")
             return
 
@@ -213,6 +301,18 @@ def build_runtime() -> Runtime:
         log.info("Wake engine: openWakeWord (.tflite)")
 
     vp = VoicePipeline(bus=bus, wake=wake_engine, stt=WhisperCppSTTEngine())
+
+    bus.publish(
+        "system.config",
+        offline_only=offline_only,
+    )
+
+    bus.publish("system.runtime_ready", ready=True)
+    bus.publish("system.stt_ready", ready=True)
+    bus.publish("system.wake_ready", ready=True)
+    bus.publish("system.tts_ready", ready=True)
+
+    bus.publish("ui.devices.refresh")
 
     return Runtime(
         bus=bus,
