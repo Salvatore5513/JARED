@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
 
 
 class ReviewQueuePanel(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, bus, parent=None) -> None:
         super().__init__(parent)
+        self.bus = bus
 
         self._requests_by_id: dict[str, dict] = {}
         self._items: list[dict] = []
@@ -66,11 +67,26 @@ class ReviewQueuePanel(QWidget):
         self.details = QTextEdit()
         self.details.setReadOnly(True)
 
+        self.approve_btn = QPushButton("Approve")
+        self.deny_btn = QPushButton("Deny")
+        self.inspect_btn = QPushButton("Inspect")
+
+        self.approve_btn.clicked.connect(self._approve_selected)
+        self.deny_btn.clicked.connect(self._deny_selected)
+        self.inspect_btn.clicked.connect(self._inspect_selected)
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.approve_btn)
+        actions.addWidget(self.deny_btn)
+        actions.addWidget(self.inspect_btn)
+        actions.addStretch(1)
+
         root = QVBoxLayout(self)
         root.addLayout(top)
         root.addWidget(self.status)
         root.addWidget(self.listing)
         root.addWidget(self.details)
+        root.addLayout(actions)
 
     def clear(self) -> None:
         self._items.clear()
@@ -134,6 +150,10 @@ class ReviewQueuePanel(QWidget):
                     "request": request,
                     "target": target,
                 }
+            return
+
+        if topic == "action.review.resolved":
+            self._remove_request_items(str(data.get("request_id", "")).strip())
             return
 
         if topic == "action.verified":
@@ -285,4 +305,49 @@ class ReviewQueuePanel(QWidget):
         entry = visible[row]
         self.details.setPlainText(
             json.dumps(entry["payload"], indent=2, sort_keys=True, ensure_ascii=False)
+        )
+
+    def _get_selected_entry(self) -> dict | None:
+        row = self.listing.currentRow()
+        visible = self._visible_items()
+        if row < 0 or row >= len(visible):
+            return None
+        return visible[row]
+    
+    def _approve_selected(self) -> None:
+        entry = self._get_selected_entry()
+        if not entry:
+            return
+
+        request_id = entry.get("request_id", "")
+        if not request_id:
+            return
+
+        self.bus.publish(
+            "ui.review.approve_request",
+            request_id=request_id,
+        )
+
+    def _deny_selected(self) -> None:
+        entry = self._get_selected_entry()
+        if not entry:
+            return
+
+        request_id = entry.get("request_id", "")
+        if not request_id:
+            return
+
+        self.bus.publish(
+            "ui.review.deny_request",
+            request_id=request_id,
+        )
+
+    def _inspect_selected(self) -> None:
+        entry = self._get_selected_entry()
+        if not entry:
+            return
+
+        payload = entry.get("payload", {})
+        self.details.setPlainText(
+            json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
         )

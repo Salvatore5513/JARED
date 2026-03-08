@@ -17,11 +17,19 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
 
-        self.dashboard = DashboardPanel()
+        self.dashboard = DashboardPanel(bridge.bus)
         self.devices = DevicesPanel(bridge.bus)
         self.logs = LogsPanel()
         self.settings = SettingsPanel()
-        self.review_queue = ReviewQueuePanel()
+        self.review_queue = ReviewQueuePanel(bridge.bus)
+        self._event_targets = [
+            self.dashboard,
+            self.devices,
+            self.logs,
+            self.settings,
+            self.review_queue,
+        ]
+        
 
         tabs.addTab(self.dashboard, "Dashboard")
         tabs.addTab(self.devices, "Devices")
@@ -33,18 +41,8 @@ class MainWindow(QMainWindow):
 
         bridge.event_received.connect(self._route_event)
 
-    def _route_event(self, topic: str, data: dict):
-        if hasattr(self.dashboard, "handle_event"):
-            self.dashboard.handle_event(topic, data)
-
-        if hasattr(self.devices, "handle_event"):
-            self.devices.handle_event(topic, data)
-
-        if hasattr(self.logs, "handle_event"):
-            self.logs.handle_event(topic, data)
-
-        if hasattr(self.settings, "handle_event"):
-            self.settings.handle_event(topic, data)
-
-        if hasattr(self.review_queue, "handle_event"):
-            self.review_queue.handle_event(topic, data)
+    def _route_event(self, topic: str, data: dict) -> None:
+        for target in self._event_targets:
+            handler = getattr(target, "handle_event", None)
+            if callable(handler):
+                handler(topic, data)

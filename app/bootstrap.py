@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+from dataclasses import fields, is_dataclass
+from pathlib import Path
+from typing import Any, Iterable, Mapping, cast
+from devices.state_tracker import DeviceStateTracker
+from app.runtime import Runtime
 from core.config.manager import load_config
 from core.event_bus import EventBus
 from core.net import http_client
@@ -12,24 +18,28 @@ from core.security.auth.auth_window import AuthWindow
 from core.security.policy_engine import PolicyEngine
 from core.security.rate_limits import RateLimiter
 from core.state.context_service import ContextService
-from dataclasses import asdict, is_dataclass, fields
 from devices.drivers.mqtt.driver import MQTTDriver
 from devices.drivers.registry import DriverRegistry
 from devices.execution.device_manager import DeviceManager
 from devices.registry.store import RegistryStore
-
 from nlp.intents.parser import parse
 from nlp.intents.router import IntentRouter
-
 from speech.pipeline import VoicePipeline
 from speech.stt.local_engine import WhisperCppSTTEngine
 from speech.tts.voice_output_service import VoiceOutputService
-from speech.wake.engine_keyword import KeywordWakeEngine, OpenWakeWordConfig, OpenWakeWordEngine
-from typing import Any, Iterable, Mapping, Sequence, cast
-from app.runtime import Runtime
-
+from speech.wake.engine_keyword import (
+    KeywordWakeEngine,
+    OpenWakeWordConfig,
+    OpenWakeWordEngine,
+)
+from ui.commands.router import UiCommandRouter
+from ui.dashboard.controller import DashboardController
+from ui.review.router import ReviewRouter
 
 DB_PATH = os.getenv("JARED_DB_PATH", "data/jared.db")
+DEVICE_STATE_PATH = Path(
+    os.getenv("JARED_DEVICE_STATE_PATH", "data/device_power_state.json")
+)
 
 
 def normalize_transcript_for_intent(text: str) -> str | None:
@@ -62,7 +72,6 @@ def normalize_transcript_for_intent(text: str) -> str | None:
 
     return raw if raw else None
 
-
 def build_device_manager(bus: EventBus, *, offline_only: bool) -> DeviceManager:
     """
     Milestone 3: instantiate the execution spine once, at startup.
@@ -88,11 +97,11 @@ def build_device_manager(bus: EventBus, *, offline_only: bool) -> DeviceManager:
         offline_only=offline_only,
     )
 
+
 def _safe_serialize(obj: Any) -> Any:
     if obj is None:
         return None
 
-    # dataclass -> dict (manual; avoids asdict() type-checker issues)
     if is_dataclass(obj):
         try:
             out: dict[str, Any] = {}
@@ -111,7 +120,6 @@ def _safe_serialize(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_safe_serialize(x) for x in obj]
 
-    # Generic iterable (but NOT strings/bytes/dicts handled above)
     if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
         try:
             return [_safe_serialize(x) for x in obj]
@@ -145,7 +153,6 @@ def _registry_list_devices(registry: Any) -> list[Any]:
         if res is None:
             continue
 
-        # Pylance-safe: only list() things that are actually iterable
         if isinstance(res, (list, tuple)):
             return list(res)
 
@@ -154,13 +161,14 @@ def _registry_list_devices(registry: Any) -> list[Any]:
 
     return []
 
+
 def build_runtime() -> Runtime:
     log = get_logger("JARED")
     log.info("Boot sequence started")
 
     cfg = load_config()
     net_policy = NetPolicy(config=cfg)
-    http_client.configure(net_policy)  # uses the same NetPolicy instance
+    http_client.configure(net_policy)
 
     offline_only = cfg.offline_only
     log.info(f"Offline mode: {offline_only}")
@@ -179,27 +187,34 @@ def build_runtime() -> Runtime:
     # Context spine (Milestone 3)
     context = ContextService()
 
-    # Context subscribes to all relevant event domains
     bus.subscribe("voice.wake*", context.handle_bus_event)
     bus.subscribe("stt.*", context.handle_bus_event)
     bus.subscribe("action.*", context.handle_bus_event)
     bus.subscribe("tts.*", context.handle_bus_event)
     bus.subscribe("nlp.intent", context.handle_bus_event)
 
-    # Optional: log context changes while you bring this online
     _ctx_last = {"mode": None, "busy": None, "intent": None, "device": None}
 
-    def _log_ctx(s):
+    def _log_ctx(s) -> None:
         key = (s.mode, s.busy, s.last_intent_name, s.last_device_id)
-        prev = (_ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"])
+        prev = (
+            _ctx_last["mode"],
+            _ctx_last["busy"],
+            _ctx_last["intent"],
+            _ctx_last["device"],
+        )
         if key == prev:
             return
+
         _ctx_last["mode"], _ctx_last["busy"], _ctx_last["intent"], _ctx_last["device"] = key
-        log.info(f"[ctx] mode={s.mode} busy={s.busy} intent={s.last_intent_name} device={s.last_device_id}")
+        log.info(
+            f"[ctx] mode={s.mode} busy={s.busy} "
+            f"intent={s.last_intent_name} device={s.last_device_id}"
+        )
 
     context.add_listener(_log_ctx)
 
-    def _publish_ctx(s):
+    def _publish_ctx(s) -> None:
         bus.publish(
             "ui.context.state",
             mode=str(s.mode),
@@ -210,17 +225,37 @@ def build_runtime() -> Runtime:
 
     context.add_listener(_publish_ctx)
 
-    # Milestone 3 wiring
+    # Execution / UI wiring
     device_manager = build_device_manager(bus, offline_only=offline_only)
     router = IntentRouter(device_manager=device_manager, bus=bus)
+    _ui_command_router = UiCommandRouter(bus=bus, device_manager=device_manager)
+    _dashboard_controller = DashboardController(bus=bus, offline_only=offline_only)
+    _review_router = ReviewRouter(bus=bus)
+    _state_tracker = DeviceStateTracker(
+        bus=bus,
+        state_path=DEVICE_STATE_PATH,
+        registry=device_manager.registry,
+    )
 
-    def on_ui_devices_refresh(_evt):
-        devices = device_manager.registry.list_devices()
-        bus.publish("ui.devices.snapshot", devices=_safe_serialize(devices))
+    def on_ui_devices_refresh(_evt) -> None:
+        devices = _registry_list_devices(device_manager.registry)
+        serialized = _safe_serialize(devices)
+
+        if isinstance(serialized, list):
+            for item in serialized:
+                if not isinstance(item, dict):
+                    continue
+                device_id = str(item.get("device_id", "")).strip()
+                if not device_id:
+                    continue
+                item["last_known_power_state"] = _state_tracker.get_power_state(device_id)
+                item["last_known_availability"] = _state_tracker.get_availability(device_id)
+                
+        bus.publish("ui.devices.snapshot", devices=serialized)
 
     bus.subscribe("ui.devices.refresh", on_ui_devices_refresh)
 
-    def on_transcript(evt):
+    def on_transcript(evt) -> None:
         raw_text = evt.data.get("text", "")
         clean = normalize_transcript_for_intent(raw_text)
         if clean is None:
@@ -246,7 +281,7 @@ def build_runtime() -> Runtime:
             raw_text=match.raw_text,
         )
 
-    def on_intent(evt):
+    def on_intent(evt) -> None:
         log.info(
             f"[intent] {evt.data['name']} ({evt.data['confidence']:.2f}) "
             f"slots={evt.data['slots']} | '{evt.data['raw_text']}'"
@@ -258,10 +293,10 @@ def build_runtime() -> Runtime:
             raw_text=evt.data["raw_text"],
         )
 
-    def on_stt_listening(_evt):
+    def on_stt_listening(_evt) -> None:
         log.info("[stt] listening...")
 
-    def on_stt_skipped(evt):
+    def on_stt_skipped(evt) -> None:
         reason = evt.data.get("reason", "unknown")
         rms = evt.data.get("rms")
         if rms is None:
@@ -277,7 +312,12 @@ def build_runtime() -> Runtime:
     # ---- TTS Voice Output Service ----
     voice_output = VoiceOutputService(bus=bus)
 
-    disable_tts = os.getenv("JARED_TTS_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}
+    disable_tts = os.getenv("JARED_TTS_DISABLE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if disable_tts:
         log.warning("[tts] disabled by env (JARED_TTS_DISABLE=1)")
         bus.publish("tts.unavailable", reason="disabled_by_env")
@@ -302,17 +342,14 @@ def build_runtime() -> Runtime:
 
     vp = VoicePipeline(bus=bus, wake=wake_engine, stt=WhisperCppSTTEngine())
 
-    bus.publish(
-        "system.config",
-        offline_only=offline_only,
-    )
+    bus.publish("system.config", offline_only=offline_only)
 
     bus.publish("system.runtime_ready", ready=True)
     bus.publish("system.stt_ready", ready=True)
     bus.publish("system.wake_ready", ready=True)
     bus.publish("system.tts_ready", ready=True)
-
     bus.publish("ui.devices.refresh")
+    bus.publish("ui.dashboard.refresh")
 
     return Runtime(
         bus=bus,
