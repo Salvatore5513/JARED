@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, Dict, Optional
+import time
 
-from core.event_bus import EventBus, Event
+from core.event_bus import EventBus
 from core.security.audit_log import AuditLog
 from core.security.rate_limits import RateLimiter
 from core.security.policy_engine import PolicyEngine
 from core.security.auth.auth_window import AuthWindow
-from core.contracts.action_request import ActionRequest, ActionOutcome, PolicyDecision, AuthLevel
+from core.contracts.action_request import (
+    ActionRequest,
+    ActionOutcome,
+    PolicyDecision,
+    AuthLevel,
+)
 from devices.execution.verifier import Verifier
-from devices.registry.models import DeviceTarget
+from devices.registry.models import DeviceTarget, DeviceRecord
 from devices.registry.store import RegistryStore
 from devices.drivers.registry import DriverRegistry
 from devices.drivers.base import DriverResult
@@ -46,10 +52,15 @@ class DeviceManager:
         self.offline_only = bool(offline_only)
 
     def handle(self, req: ActionRequest, *, target: DeviceTarget) -> ActionOutcome:
-        # 0) publish requested
-        self._emit("action.requested", {"request": asdict(req), "target": asdict(target)})
+        self._emit(
+            "action.requested",
+            self._base_payload(
+                req=req,
+                target=target,
+                stage="requested",
+            ),
+        )
 
-        # 1) resolve device
         matches = self.registry.resolve_candidates(target)
 
         if len(matches) > 1:
@@ -67,13 +78,14 @@ class DeviceManager:
             self._audit_policy(req, decision)
             self._emit(
                 "action.failed",
-                {
-                    "request_id": req.request_id,
-                    "stage": "resolve",
-                    "code": "AMBIGUOUS_DEVICE",
-                    "details": message,
-                    "candidates": options,
-                },
+                self._base_payload(
+                    req=req,
+                    target=target,
+                    stage="resolve",
+                    code="AMBIGUOUS_DEVICE",
+                    details=message,
+                    candidates=options,
+                ),
             )
             return ActionOutcome(request=req, policy=decision)
 
@@ -83,35 +95,29 @@ class DeviceManager:
             self._audit_policy(req, decision)
             self._emit(
                 "action.failed",
-                {
-                    "request_id": req.request_id,
-                    "stage": "resolve",
-                    "code": decision.reason_code,
-                    "details": decision.message,
-                },
+                self._base_payload(
+                    req=req,
+                    target=target,
+                    stage="resolve",
+                    code=decision.reason_code,
+                    details=decision.message,
+                ),
             )
             return ActionOutcome(request=req, policy=decision)
 
-
-        # 2) capability check (very simple for Milestone 3)
         capability_ok = self._capability_ok(req, device.capabilities)
-
-        # 3) slot check (very simple for Milestone 3)
         slots_ok = self._slots_ok(req)
 
-        # 4) rate limit
         rate_key = f"{req.intent_name}:{device.device_id}"
         rate = self.rate_limiter.check(rate_key)
         rate_limited = rate.limited
 
-        # 5) auth
-        # DeviceManager sets req.auth_level based on current auth window state (PIN/PTT)
         st = self.auth_window.get_state()
         auth_granted = st.is_valid()
 
-        # Build an enriched request WITHOUT mutating the input request object
         req2 = ActionRequest(
             request_id=req.request_id,
+            ts_ms=req.ts_ms,
             intent_name=req.intent_name,
             slots=req.slots,
             source=req.source,
@@ -120,9 +126,9 @@ class DeviceManager:
             auth_level=st.auth_level,
             device_id=device.device_id,
             room_id=device.room_id,
+            requires_verification=req.requires_verification,
         )
 
-        # 6) policy decision
         decision = self.policy.decide(
             req2,
             offline_only=self.offline_only,
@@ -134,10 +140,30 @@ class DeviceManager:
             auth_granted=auth_granted,
         )
         self._audit_policy(req2, decision)
-        self._emit("action.policy_decided", {"request_id": req2.request_id, "decision": asdict(decision)})
+        self._emit(
+            "action.policy_decided",
+            self._base_payload(
+                req=req2,
+                target=target,
+                device=device,
+                stage="policy",
+                decision=asdict(decision),
+            ),
+        )
 
         if not decision.allowed:
-            self._emit("action.failed", {"request_id": req2.request_id, "stage": "policy", "code": decision.reason_code, "details": decision.message})
+            self._emit(
+                "action.failed",
+                self._base_payload(
+                    req=req2,
+                    target=target,
+                    device=device,
+                    stage="policy",
+                    code=decision.reason_code,
+                    details=decision.message,
+                    decision=asdict(decision),
+                ),
+            )
             return ActionOutcome(request=req2, policy=decision)
 
         verification_default = {
@@ -147,25 +173,64 @@ class DeviceManager:
             "state": None,
         }
 
-        # 7) execute via driver
         driver = self.drivers.get(device.driver_kind)
         if not driver:
-            exec_result = DriverResult(ok=False, driver_code="NO_DRIVER", details="No driver registered")
-            self._audit_exec(req2, device.device_id, exec_result)
-            self._emit("action.executed", {"request_id": req2.request_id, "driver_result": asdict(exec_result)})
-            self._emit("action.failed", {"request_id": req2.request_id, "stage": "execute", "code": exec_result.driver_code, "details": exec_result.details})
+            exec_result = DriverResult(
+                ok=False,
+                driver_code="NO_DRIVER",
+                details="No driver registered",
+            )
+            latency_ms = 0
+
+            self._audit_exec(req2, device.device_id, exec_result, latency_ms)
+            self._emit(
+                "action.executed",
+                self._base_payload(
+                    req=req2,
+                    target=target,
+                    device=device,
+                    stage="execute",
+                    latency_ms=latency_ms,
+                    driver_result=asdict(exec_result),
+                ),
+            )
+            self._emit(
+                "action.failed",
+                self._base_payload(
+                    req=req2,
+                    target=target,
+                    device=device,
+                    stage="execute",
+                    code=exec_result.driver_code,
+                    details=exec_result.details,
+                    latency_ms=latency_ms,
+                    driver_result=asdict(exec_result),
+                ),
+            )
             return ActionOutcome(
                 request=req2,
                 policy=decision,
                 execution_result=asdict(exec_result),
                 verification_result=verification_default,
             )
-        
-        exec_result = driver.execute(device, req2)
-        self._audit_exec(req2, device.device_id, exec_result)
-        self._emit("action.executed", {"request_id": req2.request_id, "driver_result": asdict(exec_result)})
 
-        # 8) verify (best effort)
+        started = time.perf_counter()
+        exec_result = driver.execute(device, req2)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        self._audit_exec(req2, device.device_id, exec_result, latency_ms)
+        self._emit(
+            "action.executed",
+            self._base_payload(
+                req=req2,
+                target=target,
+                device=device,
+                stage="execute",
+                latency_ms=latency_ms,
+                driver_result=asdict(exec_result),
+            ),
+        )
+
         state = None
         try:
             state = driver.read_state(device)
@@ -179,18 +244,37 @@ class DeviceManager:
             state=state,
         )
         self._audit_verify(req2, ver.__dict__)
-        self._emit("action.verified", {"request_id": req2.request_id, "verification": ver.__dict__})
+        self._emit(
+            "action.verified",
+            self._base_payload(
+                req=req2,
+                target=target,
+                device=device,
+                stage="verify",
+                latency_ms=latency_ms,
+                driver_result=asdict(exec_result),
+                verification=ver.__dict__,
+            ),
+        )
 
-        # Enforce verification requirements from policy
         if decision.requires_verification and not ver.verified:
             self._emit(
                 "action.failed",
-                {
-                    "request_id": req2.request_id,
-                    "stage": "verify",
-                    "code": "VERIFY_FAILED",
-                    "details": f"Verification required by policy (auth={decision.required_auth.name}) but did not verify",
-                },
+                self._base_payload(
+                    req=req2,
+                    target=target,
+                    device=device,
+                    stage="verify",
+                    code="VERIFY_FAILED",
+                    details=(
+                        f"Verification required by policy "
+                        f"(auth={decision.required_auth.name}) but did not verify"
+                    ),
+                    latency_ms=latency_ms,
+                    driver_result=asdict(exec_result),
+                    verification=ver.__dict__,
+                    decision=asdict(decision),
+                ),
             )
             return ActionOutcome(
                 request=req2,
@@ -206,19 +290,62 @@ class DeviceManager:
             verification_result=ver.__dict__,
         )
 
-    # -------------------------
-    # Helpers
-    # -------------------------
+    def _base_payload(
+        self,
+        *,
+        req: ActionRequest,
+        target: DeviceTarget,
+        stage: str,
+        device: DeviceRecord | None = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "request_id": req.request_id,
+            "stage": stage,
+            "request": asdict(req),
+            "target": asdict(target),
+            "intent_name": req.intent_name,
+            "source": req.source,
+        }
+
+        request_device_id = req.device_id or ""
+        request_room_id = req.room_id or ""
+        target_device_id = target.device_id or ""
+        target_room_id = target.room_id or ""
+
+        device_id = ""
+        room_id = ""
+        device_name = ""
+        driver_kind = ""
+
+        if device is not None:
+            device_id = device.device_id
+            room_id = device.room_id
+            device_name = device.name
+            driver_kind = device.driver_kind
+        else:
+            device_id = request_device_id or target_device_id
+            room_id = request_room_id or target_room_id
+
+        if device_id:
+            payload["device_id"] = device_id
+        if room_id:
+            payload["room_id"] = room_id
+        if device_name:
+            payload["device_name"] = device_name
+        if driver_kind:
+            payload["driver_kind"] = driver_kind
+
+        payload.update(extra)
+        return payload
 
     def _emit(self, topic: str, payload: Dict[str, Any]) -> None:
         try:
-            # EventBus expects keyword args; payload must be unpacked
             self.bus.publish(topic, **payload)
         except Exception:
             pass
 
     def _capability_ok(self, req: ActionRequest, caps: Dict[str, Any]) -> bool:
-        # Map intents to capability requirements
         if req.intent_name in ("device.set_power", "device.toggle"):
             return bool(caps.get("power", False))
         if req.intent_name == "device.set_level":
@@ -226,7 +353,6 @@ class DeviceManager:
         return True
 
     def _slots_ok(self, req: ActionRequest) -> bool:
-        # Minimal checks
         if req.intent_name == "device.set_power":
             return "state" in req.slots or "power" in req.slots or "enabled" in req.slots
         if req.intent_name == "device.set_level":
@@ -241,12 +367,30 @@ class DeviceManager:
             record={"request": asdict(req), "decision": asdict(decision)},
         )
 
-    def _audit_exec(self, req: ActionRequest, device_id: str, exec_result: DriverResult) -> None:
+    def _audit_exec(
+        self,
+        req: ActionRequest,
+        device_id: str,
+        exec_result: DriverResult,
+        latency_ms: int | None = None,
+    ) -> None:
+        summary = f"{exec_result.driver_code} ok={exec_result.ok} device={device_id}"
+        if latency_ms is not None:
+            summary += f" latency_ms={latency_ms}"
+
+        record = {
+            "request": asdict(req),
+            "device_id": device_id,
+            "driver_result": asdict(exec_result),
+        }
+        if latency_ms is not None:
+            record["latency_ms"] = latency_ms
+
         self.audit.write(
             event_type="action.executed",
             request_id=req.request_id,
-            summary=f"{exec_result.driver_code} ok={exec_result.ok} device={device_id}",
-            record={"request": asdict(req), "device_id": device_id, "driver_result": asdict(exec_result)},
+            summary=summary,
+            record=record,
         )
 
     def _audit_verify(self, req: ActionRequest, verification: Dict[str, Any]) -> None:

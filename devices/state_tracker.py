@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 
 class DeviceStateTracker:
@@ -13,9 +12,11 @@ class DeviceStateTracker:
 
         self._device_power_state: dict[str, str] = self._load_state()
         self._pending_power_state_by_request_id: dict[str, str] = {}
+        self._request_to_device_id: dict[str, str] = {}
         self._device_availability: dict[str, str] = {}
 
         self.bus.subscribe("action.requested", self._on_action_requested)
+        self.bus.subscribe("action.policy_decided", self._on_action_policy_decided)
         self.bus.subscribe("action.executed", self._on_action_executed)
         self.bus.subscribe("device.state.changed", self._on_device_state_changed)
         self.bus.subscribe("action.failed", self._on_action_failed)
@@ -45,7 +46,7 @@ class DeviceStateTracker:
             return cleaned
         except Exception:
             return {}
-        
+
     def _set_availability(self, device_id: str, availability: str) -> None:
         availability = str(availability).strip().lower()
         if availability not in {"online", "offline", "unknown"}:
@@ -93,13 +94,28 @@ class DeviceStateTracker:
 
         self._pending_power_state_by_request_id[request_id] = state
 
+        device_id = str(evt.data.get("device_id", "")).strip()
+        if device_id:
+            self._request_to_device_id[request_id] = device_id
+
+    def _on_action_policy_decided(self, evt) -> None:
+        request_id = str(evt.data.get("request_id", "")).strip()
+        device_id = str(evt.data.get("device_id", "")).strip()
+
+        if request_id and device_id:
+            self._request_to_device_id[request_id] = device_id
+
     def _on_action_executed(self, evt) -> None:
         request_id = str(evt.data.get("request_id", "")).strip()
         if not request_id:
             return
 
         state = self._pending_power_state_by_request_id.pop(request_id, "")
+        device_id = str(evt.data.get("device_id", "")).strip() or self._request_to_device_id.pop(request_id, "")
+
         if state not in {"on", "off"}:
+            return
+        if not device_id:
             return
 
         driver_result = evt.data.get("driver_result", {}) or {}
@@ -108,20 +124,8 @@ class DeviceStateTracker:
         if not driver_result.get("ok", False):
             return
 
-        raw = driver_result.get("raw", {}) or {}
-        if not isinstance(raw, dict):
-            return
-
-        topic = str(raw.get("topic", "")).strip()
-        if not topic:
-            return
-
-        matched_device_id = self._match_device_id_from_topic(topic)
-        if not matched_device_id:
-            return
-
-        self._set_state(matched_device_id, state, source="command")
-        self._set_availability(matched_device_id, "online")
+        self._set_state(device_id, state, source="command")
+        self._set_availability(device_id, "online")
 
     def _on_action_failed(self, evt) -> None:
         request_id = str(evt.data.get("request_id", "")).strip()
@@ -129,25 +133,15 @@ class DeviceStateTracker:
             return
 
         stage = str(evt.data.get("stage", "")).strip().lower()
-        if stage != "execute":
-            return
+        device_id = str(evt.data.get("device_id", "")).strip() or self._request_to_device_id.get(request_id, "")
 
-        # We only mark offline for execute-stage failures tied to a known pending request.
-        state = self._pending_power_state_by_request_id.get(request_id)
-        if state is None:
-            return
+        if stage == "execute" and device_id:
+            if request_id in self._pending_power_state_by_request_id:
+                self._set_availability(device_id, "offline")
 
-        # Try to resolve device from the original requested action path by matching request_id later
-        # via the executed/failed path's request payload if available.
-        request = evt.data.get("request", {}) or {}
-        if not isinstance(request, dict):
-            return
-
-        device_id = str(request.get("device_id", "")).strip()
-        if not device_id:
-            return
-
-        self._set_availability(device_id, "offline")
+        if stage in {"resolve", "policy", "execute", "verify"}:
+            self._pending_power_state_by_request_id.pop(request_id, None)
+            self._request_to_device_id.pop(request_id, None)
 
     def _on_device_availability_changed(self, evt) -> None:
         device_id = str(evt.data.get("device_id", "")).strip()
@@ -184,16 +178,3 @@ class DeviceStateTracker:
             source=source,
         )
         self.bus.publish("ui.devices.refresh")
-
-    def _match_device_id_from_topic(self, topic: str) -> str:
-        try:
-            devices = self.registry.list_devices()
-        except Exception:
-            return ""
-
-        for dev in devices:
-            cfg = getattr(dev, "driver_config", {}) or {}
-            if isinstance(cfg, dict) and str(cfg.get("topic_cmd", "")).strip() == topic:
-                return str(getattr(dev, "device_id", "")).strip()
-
-        return ""

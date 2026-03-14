@@ -25,7 +25,6 @@ class Runtime:
         if self._voice_thread and self._voice_thread.is_alive():
             return
 
-        # Announce startup (UI/logs can show this immediately)
         try:
             self.bus.publish("system.startup", state="starting")
         except Exception:
@@ -38,26 +37,31 @@ class Runtime:
         )
         self._voice_thread.start()
 
-        # Confirm started
         try:
             self.bus.publish("system.startup", state="started")
         except Exception:
             pass
 
     def stop(self) -> None:
-        # Notify system that shutdown is starting
         try:
             self.bus.publish("system.shutdown", reason="runtime_stop")
         except Exception:
             pass
 
-        # Stop voice pipeline
         try:
             self.voice.stop()
         except Exception:
             pass
 
-        # Stop TTS service if present
+        voice_thread = self._voice_thread
+        if voice_thread is not None and voice_thread.is_alive():
+            try:
+                voice_thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        self._voice_thread = None
+
         if self.voice_output is not None:
             try:
                 self.voice_output.stop()

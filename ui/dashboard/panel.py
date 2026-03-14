@@ -45,6 +45,8 @@ class DashboardPanel(QWidget):
         self.stt_ready_value = QLabel("—")
         self.wake_ready_value = QLabel("—")
         self.tts_ready_status_value = QLabel("—")
+        self.boot_total_value = QLabel("—")
+        self.boot_stages_value = QLabel("—")
         self.activity = QTextEdit()
         self.activity.setReadOnly(True)
 
@@ -67,6 +69,12 @@ class DashboardPanel(QWidget):
 
         system_grid.addWidget(QLabel("Devices Loaded:"), 4, 0)
         system_grid.addWidget(self.devices_value, 4, 1)
+
+        system_grid.addWidget(QLabel("Boot Total:"), 5, 0)
+        system_grid.addWidget(self.boot_total_value, 5, 1)
+
+        system_grid.addWidget(QLabel("Boot Stages:"), 6, 0)
+        system_grid.addWidget(self.boot_stages_value, 6, 1)
 
         system_box.setLayout(system_grid)
 
@@ -126,6 +134,11 @@ class DashboardPanel(QWidget):
         root.addWidget(command_box)
         root.addWidget(activity_box, 1)
 
+    def _format_ms(self, ms: int) -> str:
+        if ms >= 1000:
+            return f"{ms / 1000.0:.1f}s"
+        return f"{ms} ms"
+
     def refresh(self) -> None:
         self.bus.publish("ui.dashboard.refresh")
 
@@ -144,10 +157,26 @@ class DashboardPanel(QWidget):
             self.stt_ready_value.setText("ready" if stt_ready else "not ready")
             self.wake_ready_value.setText("ready" if wake_ready else "not ready")
             self.tts_ready_status_value.setText("ready" if tts_ready else "not ready")
-
             self.pipeline_value.setText(str(data.get("voice_pipeline_state", "—")))
             self.stt_engine_value.setText(str(data.get("stt_engine", "—")))
             self.wake_engine_value.setText(str(data.get("wake_engine", "—")))
+
+            boot_total_ms = int(data.get("boot_total_ms", 0) or 0)
+            boot_stages = data.get("boot_stages", []) or []
+
+            if boot_total_ms > 0:
+                self.boot_total_value.setText(self._format_ms(boot_total_ms))
+            else:
+                self.boot_total_value.setText("—")
+
+            stage_parts = []
+            for item in boot_stages:
+                stage = str(item.get("stage", "")).strip()
+                elapsed_ms = int(item.get("elapsed_ms", 0) or 0)
+                if stage:
+                    stage_parts.append(f"{stage}: {self._format_ms(elapsed_ms)}")
+
+            self.boot_stages_value.setText(" | ".join(stage_parts) if stage_parts else "—")
 
             mode = str(data.get("context_mode", "")).upper()
             busy = bool(data.get("busy", False))

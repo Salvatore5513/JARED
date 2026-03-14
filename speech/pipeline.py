@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 import numpy as np
 
@@ -24,9 +24,17 @@ class VoicePipeline:
     min_stt_rms: float = 800.0
     skip_blank_audio: bool = True
 
+    _running: bool = field(default=False, init=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
+
     def start(self) -> None:
+        if self._started:
+            return
+
         self.wake.start()
         self.stt.start()
+        self._started = True
+
         self.bus.publish(
             "voice.pipeline",
             state="started",
@@ -35,17 +43,28 @@ class VoicePipeline:
         )
 
     def stop(self) -> None:
+        self._running = False
+
         try:
             self.wake.stop()
         finally:
             self.stt.stop()
-        self.bus.publish("voice.pipeline", state="stopped")
+
+        if self._started:
+            self.bus.publish("voice.pipeline", state="stopped")
+
+        self._started = False
 
     def run_forever(self) -> None:
         self.start()
+        self._running = True
+
         try:
-            while True:
+            while self._running:
                 wr = self.wake.poll()
+
+                if not self._running:
+                    break
 
                 if not wr.triggered:
                     time.sleep(self.idle_sleep_s)
@@ -67,6 +86,9 @@ class VoicePipeline:
                     time.sleep(self.post_wake_delay_s)
 
                 try:
+                    if not self._running:
+                        break
+
                     self.bus.publish("stt.listening", phase="wake_stt")
 
                     tr = None
@@ -89,15 +111,18 @@ class VoicePipeline:
                         tr = self.stt.transcribe_once(audio=wr.audio)
 
                 finally:
-                    # Clear wake state so the same "hey jared" can't instantly re-trigger
-                    if hasattr(self.wake, "reset"):
-                        self.wake.reset()  # type: ignore[attr-defined]
+                    # Only try to restore wake engine if we're still running
+                    if self._running:
+                        if hasattr(self.wake, "reset"):
+                            self.wake.reset()  # type: ignore[attr-defined]
 
-                    if hasattr(self.wake, "resume"):
-                        self.wake.resume()  # type: ignore[attr-defined]
+                        if hasattr(self.wake, "resume"):
+                            self.wake.resume()  # type: ignore[attr-defined]
+                        else:
+                            self.wake.start()
 
-                    else:
-                        self.wake.start()
+                if not self._running:
+                    break
 
                 if tr is None:
                     continue
@@ -112,3 +137,16 @@ class VoicePipeline:
         except KeyboardInterrupt:
             self.stop()
             raise
+        except Exception as e:
+            try:
+                self.bus.publish(
+                    "voice.pipeline",
+                    state="error",
+                    error=repr(e),
+                )
+            except Exception:
+                pass
+            self.stop()
+            raise
+        finally:
+            self._running = False

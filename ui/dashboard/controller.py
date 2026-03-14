@@ -24,6 +24,9 @@ class DashboardController:
             "wake_engine": "",
             "assistant_text": "",
             "tts_status": "idle",
+            "recent_activity": [],
+            "boot_total_ms": 0,
+            "boot_stages": [],
         }
         self.recent_activity: list[str] = []
 
@@ -44,6 +47,7 @@ class DashboardController:
         self.bus.subscribe("system.stt_ready", self._on_system_stt_ready)
         self.bus.subscribe("system.wake_ready", self._on_system_wake_ready)
         self.bus.subscribe("system.tts_ready", self._on_system_tts_ready)
+        self.bus.subscribe("system.boot.stage", self._on_system_boot_stage)
 
     def publish_snapshot(self) -> None:
         self.bus.publish("ui.dashboard.snapshot", **self.state)
@@ -70,8 +74,6 @@ class DashboardController:
             self.recent_activity.pop(0)
 
         self.state["recent_activity"] = list(self.recent_activity)
-
-        self.publish_snapshot()
 
     def _on_voice_pipeline(self, evt) -> None:
         self.state["voice_pipeline_state"] = str(evt.data.get("state", "unknown"))
@@ -114,9 +116,13 @@ class DashboardController:
         if not isinstance(decision, dict):
             return
 
-        self.state["last_action_status"] = (
-            "allowed" if decision.get("allowed") else "denied"
-        )
+        allowed = bool(decision.get("allowed"))
+        self.state["last_action_status"] = "allowed" if allowed else "denied"
+
+        if not allowed:
+            reason = str(decision.get("reason", "denied")).strip()
+            self._add_activity(f"Policy Denied: {reason}")
+
         self.publish_snapshot()
 
     def _on_action_executed(self, evt) -> None:
@@ -124,21 +130,30 @@ class DashboardController:
         if not isinstance(driver_result, dict):
             return
 
-        ok = driver_result.get("ok", False)
-
+        ok = bool(driver_result.get("ok", False))
         self.state["last_action_status"] = "executed" if ok else "failed"
-
         self._add_activity("Action Executed" if ok else "Action Failed")
-
         self.publish_snapshot()
 
-    def _on_action_failed(self, _evt) -> None:
+    def _on_action_failed(self, evt) -> None:
         self.state["last_action_status"] = "failed"
+
+        reason = str(evt.data.get("reason", "")).strip()
+        code = str(evt.data.get("code", "")).strip()
+
+        if reason and code:
+            self._add_activity(f"Action Failed: {code} | {reason}")
+        elif reason:
+            self._add_activity(f"Action Failed: {reason}")
+        elif code:
+            self._add_activity(f"Action Failed: {code}")
+        else:
+            self._add_activity("Action Failed")
+
         self.publish_snapshot()
 
     def _on_assistant_say(self, evt) -> None:
         text = str(evt.data.get("text", "")).strip()
-
         self.state["assistant_text"] = text
 
         if text:
@@ -178,4 +193,22 @@ class DashboardController:
 
     def _on_system_tts_ready(self, evt) -> None:
         self.state["tts_ready"] = bool(evt.data.get("ready", False))
+        self.publish_snapshot()
+
+    def _on_system_boot_stage(self, evt) -> None:
+        stage = str(evt.data.get("stage", "")).strip()
+        elapsed_ms = int(evt.data.get("elapsed_ms", 0) or 0)
+        total_ms = int(evt.data.get("total_ms", 0) or 0)
+
+        stages = list(self.state.get("boot_stages", []))
+
+        stages = [s for s in stages if s.get("stage") != stage]
+        stages.append({"stage": stage, "elapsed_ms": elapsed_ms})
+
+        order = {"Runtime": 10, "Devices": 20, "Voice": 30, "UI": 40}
+        stages.sort(key=lambda s: order.get(s.get("stage", ""), 999))
+
+        self.state["boot_stages"] = stages
+        self.state["boot_total_ms"] = total_ms
+
         self.publish_snapshot()

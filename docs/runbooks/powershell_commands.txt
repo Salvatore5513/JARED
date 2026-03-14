@@ -1,0 +1,36 @@
+
+SIDECAR(TTS) AND JARED MUST RUN IN SEPERATE TERMINALS!!!
+
+- Be sure to start tts venv for tts:
+.\.venv-tts\Scripts\activate
+
+- To run side car (basically tts) use command:
+python -m speech.tts.sidecar.service
+
+- To enable regular venv:
+.\.venv\Scripts\activate
+
+- To run export snapshot 
+python  tools\export_jared_snapshot.py
+
+- To show current number of lines
+Get-ChildItem -Recurse -Include *.py ` -Exclude *.pyc ` | Where-Object { $_.FullName -notmatch "\\\.venv" -and $_.FullName -notmatch "\\data\\" } ` | Get-Content ` | Measure-Object -Line
+
+- To show lines, words, and characters
+Get-ChildItem -Recurse -Include *.py ` | Where-Object { $_.FullName -notmatch "\\\.venv" -and $_.FullName -notmatch "\\data\\" } ` | Get-Content ` | Measure-Object -Line -Word -Character
+
+- To show largest to smallest folders
+Get-ChildItem -Recurse -File -Filter *.py | Where-Object { $_.FullName -notmatch "\\\.venv" -and $_.FullName -notmatch "\\data\\" } | ForEach-Object { $lines=(Get-Content $_.FullName | Measure-Object -Line).Lines; $rel=$_.FullName.Substring((Get-Location).Path.Length).TrimStart('\'); $top=($rel -split '\\')[0]; [PSCustomObject]@{Folder=$top;Lines=$lines} } | Group-Object Folder | ForEach-Object { [PSCustomObject]@{Folder=$_.Name;Lines=($_.Group | Measure-Object Lines -Sum).Sum} } | Sort-Object Lines -Descending
+
+- To show largest to smallest files
+Get-ChildItem -Recurse -File -Filter *.py | Where-Object { $_.FullName -notmatch "\\\.venv" -and $_.FullName -notmatch "\\data\\" } | ForEach-Object { $m=Get-Content $_.FullName | Measure-Object -Line -Word -Character; [PSCustomObject]@{File=$_.FullName.Substring((Get-Location).Path.Length).TrimStart('\');Lines=$m.Lines;Words=$m.Words;Chars=$m.Characters} } | Sort-Object Lines -Descending | Select-Object -First 20
+
+- To show largest to smallest folders that are being tracked by GitHub
+git ls-files "*.py" | Where-Object { $_ -notmatch "^\.venv" -and $_ -notmatch "^data/" } | ForEach-Object { $m=Get-Content $_ | Measure-Object -Line; $top=($_ -split "/")[0]; [PSCustomObject]@{Folder=$top;Lines=$m.Lines} } | Group-Object Folder | ForEach-Object { [PSCustomObject]@{Folder=$_.Name;Lines=($_.Group | Measure-Object Lines -Sum).Sum} } | Sort-Object Lines -Descending
+
+
+
+- PROJECT ANALYZER
+python analyze_project.py
+
+asks for path just run it in root folder and answer with .

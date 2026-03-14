@@ -14,7 +14,7 @@ _TTS_MODEL_NAME = None
 _TTS_DEVICE = None
 
 DEFAULT_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
-DEFAULT_SPEAKER_WAV = os.environ.get("JARED_TTS_SPEAKER_WAV", "data/voices/jared.wav")
+DEFAULT_SPEAKER_WAV = os.environ.get("JARED_TTS_SPEAKER_WAV", "data/voices/JARED_Voice.wav")
 
 
 def _load_tts(device: str, model_name: str):
